@@ -1,0 +1,46 @@
+# Configuration for the MARL Physics Simulation Space
+
+world:
+  height: 10
+  width: 10
+  dt: 0.01
+  drag: 0.01
+  batch_dim: 10
+  wall_thickness: 0.01
+
+
+agents:
+  - name: "agent_1"
+    radius: 0.3
+  - name: "agent_1"
+    radius: 0.4
+
+
+obstacles:
+  # Landmarks represent target destinations (they don't block movement)
+  - name: "obstacle_1"
+    shape: "box"
+    width: 2
+    hight: 4
+    position: [2, 5]
+    rotation: 1.5 
+  
+
+landmark:
+  # Static structural obstacles that block paths (collide=true, movable=false)
+  - name: "center_pillar"
+    shape: "circle"
+    radius: 0.15
+    position: [0.0, 0.0]
+  
+  - name: "top_wall"
+    shape: "box"
+    length: 1.6
+    width: 0.06
+    position: [0.0, 0.7]
+
+  - name: "left_divider"
+    shape: "box"
+    length: 0.06
+    width: 0.5
+    position: [-0.6, -0.2]
