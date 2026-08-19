@@ -21,6 +21,7 @@ class Map:
     class entity_info:
         def __init__(self, name: str = ""):
             self.name = name
+            self.shape: Shape
 
     class AgentInfo(entity_info):
         def __init__(self, radius: float, position: Tensor | None = None, name: str = "", color: Color = Color.RED):
@@ -45,6 +46,20 @@ class Map:
             self.angle = angle
             self.is_boundary: bool = is_boundary
 
+    class VictimInfo(entity_info):
+        def __init__(
+                self,weight:float,
+                position: torch.Tensor,
+                shape: Sphere,
+                name:str = "",
+                ):
+            super().__init__(name)
+            self.weight = weight
+            self.position: torch.Tensor = position
+            self.shape = shape
+        def get_reqired_agents_to_rescue(self) -> int: 
+            return math.ceil(self.weight / 10)
+
     def __init__(
         self,
         height: float,
@@ -66,35 +81,36 @@ class Map:
         self.max_cell_size: float = 0.0
         self.cell_size: float = cell_size
         self._configure_cells(cell_size)
+        self.victims: list[Map.VictimInfo] = []
 
         if have_boundary:
             self.obstacles.extend(
                 [
                     Map.ObstacleInfo(
-                        shape=Box(width=self.wall_thickness, length=self.height),
-                        position=torch.tensor([self.width / 2 - self.wall_thickness / 2,0 ], dtype=torch.float32),
+                        shape=Box(width=self.height, length=self.wall_thickness),
+                        position=torch.tensor([ self.wall_thickness / 2.0  , self.height / 2 ], dtype=torch.float32),
                         angle=0.0,
                         is_boundary=True,
                         name="boundary_left",
 
                     ),
                     Map.ObstacleInfo(
-                        shape=Box(width=self.wall_thickness, length=self.height),
-                        position=torch.tensor([ self.wall_thickness / 2 - self.width / 2, 0], dtype=torch.float32),
+                        shape=Box(width=self.height, length=self.wall_thickness),
+                        position=torch.tensor([ self.width - self.wall_thickness / 2  , self.height / 2 ], dtype=torch.float32),
                         angle=0.0,
                         is_boundary=True,
                         name="boundary_right",
                     ),
                     Map.ObstacleInfo(
-                        shape=Box(width=self.width, length=self.wall_thickness),
-                        position=torch.tensor([0, self.wall_thickness / 2 - self.height / 2], dtype=torch.float32),
+                        shape=Box(width=self.wall_thickness, length=self.width),
+                        position=torch.tensor([self.width / 2, self.wall_thickness / 2 ], dtype=torch.float32),
                         angle=0.0,
                         is_boundary=True,
                         name="boundary_bottom",
                     ),
                     Map.ObstacleInfo(
-                        shape=Box(width=self.width, length=self.wall_thickness),
-                        position=torch.tensor([0, self.height / 1 - self.wall_thickness / 2], dtype=torch.float32),
+                        shape=Box(width=self.wall_thickness, length=self.width),
+                        position=torch.tensor([self.width / 2, self.height - self.wall_thickness / 2], dtype=torch.float32),
                         angle=0.0,
                         is_boundary=True,
                         name="boundary_top",
@@ -104,10 +120,10 @@ class Map:
 
     def _configure_cells(self, cell_size: float) -> None:
         self.cell_size = cell_size
-        usable_left = self.width / 2 - (self.wall_thickness if self.have_boundary else 0.0)
-        usable_bottom = (self.wall_thickness if self.have_boundary else 0.0) - self.height / 2
-        usable_width = max(self.width - (2 * self.wall_thickness if self.have_boundary else 0.0), 0.0)
-        usable_height = max(self.height - (2 * self.wall_thickness if self.have_boundary else 0.0), 0.0)
+        usable_left =  (self.wall_thickness if self.have_boundary else 0.0)  
+        usable_bottom = (self.wall_thickness if self.have_boundary else 0.0)  
+        usable_width = self.width - max((2 * self.wall_thickness if self.have_boundary else 0.0), 0.0)
+        usable_height = self.height - max((2 * self.wall_thickness if self.have_boundary else 0.0), 0.0)
 
         self.grid_width = max(1, math.ceil(usable_width / cell_size))
         self.grid_height = max(1, math.ceil(usable_height / cell_size))
@@ -123,10 +139,10 @@ class Map:
         self._refresh_free_cells()
 
     def _cell_center(self, row: int, col: int) -> Tensor:
-        return torch.tensor([self.start_x - col * self.cell_width, self.start_y + row * self.cell_height], dtype=torch.float32)
+        return torch.tensor([self.start_x + col * self.cell_width, self.start_y + row * self.cell_height], dtype=torch.float32)
 
     def _cell_index_from_position(self, position: Tensor) -> tuple[int, int]:
-        col = int(round( self.start_x - (float(position[0])) / self.cell_width))
+        col = int(round( (float(position[0]) - self.start_x) / self.cell_width))
         row = int(round((float(position[1]) - self.start_y) / self.cell_height))
         row = max(0, min(self.cells_bitmap.shape[0] - 1, row))
         col = max(0, min(self.cells_bitmap.shape[1] - 1, col))
@@ -149,7 +165,7 @@ class Map:
             if isinstance(entity.shape, Box):
                 half_width = float(entity.shape.width) / 2.0
                 half_length = float(entity.shape.length) / 2.0
-                return math.sqrt(half_width * half_width + half_length * half_length)
+                return math.sqrt(half_width**2 + half_length**2)
         return 0.0
 
     def _cell_is_legal(self, row: int, col: int, clearance: float) -> bool:
@@ -279,12 +295,11 @@ class Map:
         max_obstacle_width: float = 4,
         min_obstacle_width: float = 0.3,
         cell_size: float = 1.0,
+        num_victims: int = 3,
     ) -> "Map":
         self.obstacles = [obstacle for obstacle in self.obstacles if obstacle.is_boundary]
         self.agents = []
         self._configure_cells(cell_size)
-
-        colors = [Color.RED, Color.GREEN, Color.BLUE, Color.YELLOW, Color.PURPLE, Color.YELLOW]
         agent_radius_low, agent_radius_high = sorted((min_agent_radius, max_agent_radius))
         obstacle_width_low, obstacle_width_high = sorted((min_obstacle_width, max_obstacle_width))
         obstacle_length_low, obstacle_length_high = sorted((min_obstacle_length, max_obstacle_length))
@@ -318,12 +333,27 @@ class Map:
                 radius=radius,
                 position=torch.zeros(2, dtype=torch.float32),
                 name=f"agent_{index}",
-                color=random.choice(colors),
+                color= Color.BLUE,
             )
             agent.position = self.get_free_cell(agent)
             self.agents.append(agent)
+        for index in range(num_victims):
+            weight = random.uniform(5, 30)
+            victim = Map.VictimInfo(
+                name = f"victim_{index}",
+                weight=weight,
+                position=torch.zeros(2, dtype=torch.float32),
+                shape = Sphere(radius=min(self.width, self.height) / 100),
+            )
+            victim.position = self.get_free_cell(victim)
+            self.victims.append(victim)
+            
 
         return self
+    def reset_agents(self):
+        for agent in self.agents:
+            self._release_entity(agent)
+            agent.position = self.get_free_cell(agent)
 
     def get_free_cell(self, entity: object = None) -> Tensor:
         if self.cells_bitmap.numel() == 0:
