@@ -81,7 +81,7 @@ class Map:
         self.max_cell_size: float = 0.0
         self.cell_size: float = cell_size
         self._configure_cells(cell_size)
-        self.victims: list[Map.VictimInfo] = []
+        self.survivals: list[Map.VictimInfo] = []
 
         if have_boundary:
             self.obstacles.extend(
@@ -261,7 +261,7 @@ class Map:
             if shape_str == "sphere":
                 shape = Sphere(radius=obs["radius"])
             elif shape_str == "box":
-                shape = Box(width=obs["width"], length=obs["height"])
+                shape = Box(width=obs["width"], length=obs.get("length", obs.get("height")))
             else:
                 raise AssertionError(f"shape {obs['shape']} not a valid shape")
 
@@ -269,6 +269,7 @@ class Map:
                 shape=shape,
                 position=torch.tensor(obs["position"], dtype=torch.float32),
                 angle=obs.get("rotation", obs.get("angle", 0.0)),
+                name=obs.get("name", ""),
             )
             self.obstacles.append(obstacle)
             row, col = self._cell_index_from_position(obstacle.position)
@@ -280,6 +281,18 @@ class Map:
             self.agents.append(agent)
             row, col = self._cell_index_from_position(position)
             self._mark_cell_occupied(row, col, agent)
+
+        for vic in config.get("victims", []):
+            position = torch.tensor(vic.get("position", [0.0, 0.0]), dtype=torch.float32)
+            victim = Map.VictimInfo(
+                weight=vic.get("weight", 10.0),
+                position=position,
+                shape=Sphere(radius=vic.get("radius", min(self.width, self.height) / 100)),
+                name=vic.get("name", ""),
+            )
+            self.survivals.append(victim)
+            row, col = self._cell_index_from_position(position)
+            self._mark_cell_occupied(row, col, victim)
 
         return self
 
@@ -299,6 +312,7 @@ class Map:
     ) -> "Map":
         self.obstacles = [obstacle for obstacle in self.obstacles if obstacle.is_boundary]
         self.agents = []
+        self.survivals = []
         self._configure_cells(cell_size)
         agent_radius_low, agent_radius_high = sorted((min_agent_radius, max_agent_radius))
         obstacle_width_low, obstacle_width_high = sorted((min_obstacle_width, max_obstacle_width))
@@ -346,7 +360,7 @@ class Map:
                 shape = Sphere(radius=min(self.width, self.height) / 100),
             )
             victim.position = self.get_free_cell(victim)
-            self.victims.append(victim)
+            self.survivals.append(victim)
             
 
         return self
@@ -399,6 +413,17 @@ class Map:
                 }
             )
 
+        victims = []
+        for victim in self.survivals:
+            victims.append(
+                {
+                    "name": victim.name,
+                    "weight": float(victim.weight),
+                    "radius": float(victim.shape.radius),
+                    "position": victim.position.tolist(),
+                }
+            )
+
         return {
             "world": {
                 "height": float(self.height),
@@ -408,6 +433,7 @@ class Map:
             },
             "agents": agents,
             "obstacles": obstacles,
+            "victims": victims,
         }
 
     def save_to_yaml(self, path: str) -> None:
