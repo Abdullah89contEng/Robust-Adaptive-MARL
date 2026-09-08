@@ -40,6 +40,8 @@ def parse_args():
     p.add_argument("--checkpoint-every", type=int, default=200)
     p.add_argument("--log-every", type=int, default=10)
     p.add_argument("--config-file", type=str, default="world_config.yaml")
+    p.add_argument("--shaping-weight", type=float, default=0.0,
+                   help="potential-based reward shaping toward nearest unrescued victim (0 = off)")
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--out-dir", type=str, default=None)
     p.add_argument("--resume", type=str, default=None, help="Run dir to resume from (finds its latest phase1 checkpoint)")
@@ -130,7 +132,7 @@ def main():
 
     p1_config = Phase1Config(n_envs=args.n_envs, horizon=args.horizon)
     trainer1 = Phase1Trainer(
-        scenario_factory=lambda: Scenario(config_file=args.config_file),
+        scenario_factory=lambda: Scenario(config_file=args.config_file, shaping_weight=args.shaping_weight),
         config=p1_config,
     )
     print(f"n_agents={trainer1.n_agents} obs_dim={trainer1.obs_dim} code_dim={trainer1.code_dim}")

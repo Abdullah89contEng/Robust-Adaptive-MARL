@@ -61,6 +61,10 @@ class CausalLocalWindowTransformer(nn.Module):
         )
         self.transformer = nn.TransformerEncoder(encoder_layer, num_layers=n_layers)
         self.head = nn.Linear(d_model, 1)
+        # Start the detector quiet: sigmoid(-3) ~ 0.047. Without this the
+        # head initializes near p~0.5 and, with the delay term pulling it
+        # up, latches high in the first few steps and never comes back down.
+        nn.init.constant_(self.head.bias, -3.0)
 
     def _causal_local_mask(self, seq_len: int, device: torch.device) -> torch.Tensor:
         """(seq_len, seq_len) bool mask, True = blocked (nn.Transformer convention)."""

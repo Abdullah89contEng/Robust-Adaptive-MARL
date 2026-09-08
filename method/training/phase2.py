@@ -25,9 +25,11 @@ from dataclasses import dataclass
 
 import torch
 
+import random
+
 from ..detector.indid import CausalLocalWindowTransformer, detection_loss
 from .phase1 import Phase1Trainer
-from .regime import apply_regime, sample_episode_schedule
+from .regime import DEFAULT_MODES, apply_regime, sample_episode_schedule, sample_regime_from_modes
 
 
 @dataclass
@@ -36,7 +38,17 @@ class Phase2Config:
     n_heads: int = 4
     n_layers: int = 2
     window: int = 16
-    lambda_fa: float = 1.0
+    # The InDiD delay/FA loss alone is unbalanced on this task: with
+    # lambda_fa >= 1 "never fire" is the global optimum even when the code
+    # stream carries a strong change signal (probe AUC ~0.8) -- missing a
+    # real change costs less delay than the FA term saves. Fix: a direct
+    # per-step BCE against the ground-truth "has switched" label carries the
+    # supervision, the InDiD terms only shape delay/FA around it, and
+    # lambda_fa is dropped well below 1.
+    bce_weight: float = 1.0
+    lambda_fa: float = 0.5
+    p_no_change: float = 0.35      # fraction of episodes with NO regime switch (stationary negatives)
+    warmup_p_reg: float = 0.05     # penalty on mean p over the first `window` steps
     # 3e-4 (a common default elsewhere in this codebase) reliably diverges
     # this transformer to NaN within ~20-60 iterations -- verified directly
     # by inspecting detector.parameters() every iteration. 1e-4 ran 150
@@ -86,9 +98,35 @@ class Phase2Trainer:
         env = self.phase1.env
         n_agents = self.phase1.n_agents
 
+        H = p1_cfg.horizon
         schedule = sample_episode_schedule(
-            n_agents, p1_cfg.horizon, p1_cfg.p_sw, p1_cfg.mass_range, p1_cfg.friction_range
+            n_agents, H, p1_cfg.p_sw, p1_cfg.mass_range, p1_cfg.friction_range
         )
+
+        # Rebalance the supervision: a fixed fraction of episodes have NO
+        # switch (switch_time == H sentinel, mu_2 == mu_1); the rest get a
+        # switch time drawn UNIFORMLY over the usable window (not GEOM,
+        # which piles every positive near step ~20), and mu_2 is forced to
+        # a different dynamics mode than mu_1 so the labelled change is real.
+        if random.random() < self.cfg.p_no_change:
+            schedule.mu_2 = list(schedule.mu_1)
+            schedule.switch_time = torch.full((n_agents,), H, dtype=torch.long)
+            if schedule.mode_2 is not None:
+                schedule.mode_2 = schedule.mode_1.clone()
+        else:
+            lo = self.cfg.window + 4
+            hi = max(lo + 1, H - 8)
+            schedule.switch_time = torch.randint(lo, hi, (n_agents,))
+            for i in range(n_agents):
+                same_mode = schedule.mode_1 is not None and int(schedule.mode_2[i]) == int(schedule.mode_1[i])
+                if same_mode or schedule.mode_1 is None:
+                    m1 = int(schedule.mode_1[i]) if schedule.mode_1 is not None else -1
+                    others = [k for k in range(len(DEFAULT_MODES)) if k != m1]
+                    k = random.choice(others)
+                    schedule.mu_2[i] = sample_regime_from_modes((DEFAULT_MODES[k],))[0]
+                    if schedule.mode_2 is not None:
+                        schedule.mode_2[i] = k
+
         for i, agent in enumerate(env.agents):
             apply_regime(agent, schedule.mu_1[i])
         obs = env.reset()
@@ -125,10 +163,25 @@ class Phase2Trainer:
         n_envs, n_agents, _T, _code_dim = codes_seq.shape
 
         total_loss = torch.tensor(0.0, device=self.device)
+        w = self.detector.window
         for i in range(n_agents):
             p_i = self.detector(codes_seq[:, i])  # (n_envs, T)
+            T = p_i.shape[1]
             switch_time_i = switch_time[i].expand(n_envs)
             total_loss = total_loss + detection_loss(p_i, switch_time_i, self.cfg.lambda_fa).mean()
+
+            # direct per-step supervision: label = 1 once the regime has
+            # switched (all-zero for no-switch episodes). This is the term
+            # that actually anchors the detector; it cannot be minimized by
+            # p == 0 (that is punished on every post-switch step).
+            t_idx = torch.arange(T, device=p_i.device)
+            sw = torch.where(switch_time_i < T, switch_time_i, torch.full_like(switch_time_i, T + 1))
+            label = (t_idx.unsqueeze(0) >= (sw.unsqueeze(1) - 1)).float()
+            bce = torch.nn.functional.binary_cross_entropy(p_i.clamp(1e-4, 1 - 1e-4), label)
+            total_loss = total_loss + self.cfg.bce_weight * bce
+
+            # keep the detector quiet during its warm-up window (incomplete context)
+            total_loss = total_loss + self.cfg.warmup_p_reg * p_i[:, :w].mean()
 
         self.optimizer.zero_grad()
         total_loss.backward()

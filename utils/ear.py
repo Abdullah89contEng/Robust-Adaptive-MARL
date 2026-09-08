@@ -22,12 +22,17 @@ class Ear(Sensor):
         world: World,
         survivals: list[Survival],
         ear_offset: float | None = None,
+        rescued_value: float = 0.0,
     ):
         super().__init__(world)
         # `survivals` is shared by reference with Scenario.make_world, which
         # populates it after every agent (and its Ear) has been constructed.
         self._survivals = survivals
         self._ear_offset = ear_offset
+        # Distance reported for a survival once it has been rescued: a fixed
+        # "out of earshot" value so a rescued victim also disappears from the
+        # observation, not just from the render.
+        self._rescued_value = rescued_value
         self._last_measurement: torch.Tensor | None = None
 
     def _ear_offset_value(self) -> float:
@@ -53,7 +58,15 @@ class Ear(Sensor):
                 survival_pos = survival.state.pos
                 left_distance = torch.norm(survival_pos - left_ear, dim=-1)
                 right_distance = torch.norm(survival_pos - right_ear, dim=-1)
-                per_survival.append(torch.stack((left_distance, right_distance), dim=-1))
+                pair = torch.stack((left_distance, right_distance), dim=-1)  # (batch, 2)
+                rescued = getattr(survival, "rescued", False)
+                if torch.is_tensor(rescued):
+                    pair = torch.where(
+                        rescued.unsqueeze(-1),
+                        torch.full_like(pair, self._rescued_value),
+                        pair,
+                    )
+                per_survival.append(pair)
             measurement = torch.cat(per_survival, dim=-1)
 
         self._last_measurement = measurement

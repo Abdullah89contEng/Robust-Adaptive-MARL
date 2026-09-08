@@ -37,6 +37,7 @@ from .regime import Regime, apply_regime
 @dataclass
 class MetaTestConfig:
     threshold_C: float = 0.5
+    trigger_persistence: int = 3   # require p >= threshold_C this many steps in a row before a reset fires
     re_exploration_budget_K: int = 8
     sigma2_min: float = 0.05
     eps_pos: float = 0.2
@@ -121,6 +122,7 @@ class MetaTestRunner:
         self.obs = self.env.reset()
         self.mode = ["explore"] * self.n_agents
         self.k = [0] * self.n_agents
+        self.p_streak = [0] * self.n_agents  # consecutive steps with detector_p >= threshold_C
         self.posterior_state = self.p1.posterior.init_state((1, self.n_agents), device=self.device)
         self.active_attacks = {i: {"position": False, "action": False} for i in range(self.n_agents)}
         # Rolling per-agent code history, capped at the detector's own
@@ -216,11 +218,13 @@ class MetaTestRunner:
                 p_i = self.detector(code_seq_i)[0, -1].item()
                 detector_p[i] = p_i
 
-                if p_i >= cfg.threshold_C:
+                self.p_streak[i] = self.p_streak[i] + 1 if p_i >= cfg.threshold_C else 0
+                if self.p_streak[i] >= cfg.trigger_persistence:
                     self.posterior_state = self.p1.posterior.reset_where(self.posterior_state, agent_mask)
                     self.mode[i] = "explore"
                     self.k[i] = 0
                     self.code_history[i] = []
+                    self.p_streak[i] = 0
                     reset_fired[i] = True
 
                 if self.mode[i] == "explore" and (

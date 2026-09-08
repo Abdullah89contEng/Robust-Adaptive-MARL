@@ -26,6 +26,11 @@ class Scenario(BaseScenario):
 		fit_map: bool = False,
 		lidar_n_rays: int = 12,
 		lidar_range: float = 10.0,
+		shaping_weight: float = 0.0,
+		shaping_gamma: float = 0.99,
+		drag: float = 0.02,
+		agent_u_multiplier: float = 4.0,
+		agent_max_speed: float = 1.5,
 	):
 		super().__init__()
 		self.map = map_ if map_ is not None else make_map_from_file(config_file)
@@ -55,11 +60,27 @@ class Scenario(BaseScenario):
 		self.time_penalty = time_penalty
 		self.lidar_n_rays = lidar_n_rays
 		self.lidar_range = lidar_range
+		# Potential-based shaping toward the nearest unrescued victim:
+		# F_t = gamma * Phi(s') - Phi(s),  Phi(s) = -w * mean_i min_v ||agent_i - victim_v||.
+		# Policy-invariant (Ng et al. 1999); w=0 disables it. Needed because
+		# the bare reward is too sparse for the agents to ever approach a
+		# victim, which in turn left the regime change invisible in the
+		# transitions (probe AUC ~0.56).
+		self.shaping_weight = shaping_weight
+		self.shaping_gamma = shaping_gamma
+		self._prev_phi = None
+		# The old defaults (drag 0.25, u_multiplier 1.0) at dt 0.1 left the
+		# agents overdamped: even maximal random forcing gave mean speed
+		# ~0.07 u/step, so they could not cross the arena AND a mass/friction
+		# regime change was invisible in the transitions (probe AUC ~0.51).
+		self.drag = drag
+		self.agent_u_multiplier = agent_u_multiplier
+		self.agent_max_speed = agent_max_speed
 		self._survivals: list[Survival] = []
 
 	def make_world(self, batch_dim: int, device: torch.device, **kwargs) -> World:
 		dt = kwargs.get("dt", 0.1)
-		drag = kwargs.get("drag", self.task.drag if self.task is not None else 0.25)
+		drag = kwargs.get("drag", self.task.drag if self.task is not None else self.drag)
 		world = World(
 			batch_dim=batch_dim,
 			device=device,
@@ -88,6 +109,11 @@ class Scenario(BaseScenario):
 		# which point the list has been filled in.
 		self._survivals = []
 		obstacle_filter = lambda e: isinstance(e, Landmark) and not isinstance(e, Survival)
+		# Reported by an agent's Ear for a survival that has already been
+		# rescued: a fixed "out of earshot" distance (~2x the map diagonal),
+		# so a rescued victim disappears from the observation as well as the
+		# render.
+		ear_rescued_value = 2.0 * math.hypot(self.map.width, self.map.height)
 		for ag in self.map.agents:
 			world.add_agent(
 				Agent(
@@ -101,8 +127,10 @@ class Scenario(BaseScenario):
 							max_range=self.lidar_range,
 							entity_filter=obstacle_filter,
 						),
-						Ear(world, self._survivals),
+						Ear(world, self._survivals, rescued_value=ear_rescued_value),
 					],
+					u_multiplier=self.agent_u_multiplier,
+					max_speed=self.agent_max_speed,
 					**agent_physics,
 				)
 			)
@@ -177,6 +205,8 @@ class Scenario(BaseScenario):
 		else:
 			self._agent_rescue_bonus[env_index] = 0.0
 			self._shared_reward[env_index] = 0.0
+		# invalidate the shaping potential; the step after a reset gets 0 shaping
+		self._prev_phi = None
 
 	def observation(self, agent: Agent):
 		agent_pos = agent.state.pos
@@ -233,6 +263,18 @@ class Scenario(BaseScenario):
 				survival.rescued = survival.rescued | newly_rescued
 
 		self._shared_reward = -self.decay_penalty * total_decay + self.time_penalty
+
+		if self.shaping_weight > 0.0 and self._survivals:
+			agents_pos = torch.stack([a.state.pos for a in self.world.agents], dim=1)     # (batch, n_agents, 2)
+			survivals_pos = torch.stack([s.state.pos for s in self._survivals], dim=1)    # (batch, n_surv, 2)
+			rescued_stack = torch.stack([s.rescued for s in self._survivals], dim=1)      # (batch, n_surv)
+			d = torch.cdist(agents_pos, survivals_pos).masked_fill(rescued_stack.unsqueeze(1), float("inf"))
+			min_d = d.min(dim=2).values                                                  # (batch, n_agents)
+			min_d = torch.where(torch.isfinite(min_d), min_d, torch.zeros_like(min_d))
+			phi = -self.shaping_weight * min_d.mean(dim=1)                                # (batch,)
+			if self._prev_phi is not None and self._prev_phi.shape == phi.shape:
+				self._shared_reward = self._shared_reward + (self.shaping_gamma * phi - self._prev_phi)
+			self._prev_phi = phi.detach()
 
 	def reward(self, agent: Agent):
 		agent_index = self.world.agents.index(agent)

@@ -1,0 +1,65 @@
+# Configuration for the MARL Physics Simulation Space
+
+world:
+  height: 10
+  width: 10
+  dt: 0.01
+  drag: 0.01
+  batch_dim: 10
+  wall_thickness: 0.01
+
+
+agents:
+  - name: "agent_1"
+    radius: 0.3
+  - name: "agent_2"
+    radius: 0.4
+
+
+# Obstacles: solid, static, collide=true, block agent movement.
+obstacles:
+  - name: "obstacle_1"
+    shape: "box"
+    width: 2
+    height: 4
+    position: [2, 5]
+    rotation: 1.5
+
+  - name: "center_pillar"
+    shape: "sphere"
+    radius: 0.15
+    position: [0.0, 0.0]
+
+  - name: "top_wall"
+    shape: "box"
+    width: 1.6
+    height: 0.06
+    position: [0.0, 0.7]
+
+  - name: "left_divider"
+    shape: "box"
+    width: 0.06
+    height: 0.5
+    position: [-0.6, -0.2]
+
+
+# 5 victims for 2 agents (> 2x the agent count): the team cannot cover all
+# targets at once, so response order under health decay becomes the task.
+# weight 10 -> ceil(10/10) = 1 required rescuer each (any single agent can
+# rescue any victim; the pressure is coverage, not co-location).
+victims:
+  - name: "victim_1"
+    weight: 10
+    position: [8, 8]
+  - name: "victim_2"
+    weight: 10
+    position: [8, 3]
+  - name: "victim_3"
+    weight: 10
+    position: [5, 6]
+  - name: "victim_4"
+    weight: 10
+    position: [6, 2]
+  - name: "victim_5"
+    weight: 10
+    position: [9, 5]

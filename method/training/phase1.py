@@ -45,11 +45,18 @@ needed for the mixer (and, for the adversarial branch, for evaluating
 `Q_tot_target` at a candidate perturbed action/position).
 
 DESIGN CHOICE — CPC segments (§3) are single transitions, not multi-step
-segments: an anchor transition's positive is another transition (for the
-same agent) tagged with the same (episode, regime-half); its negatives
-are transitions from the same episode but the other regime-half (spec:
-"pre-/post-switch halves of the same episode count as different
-regimes").
+segments. An anchor transition's positive is another transition of the
+SAME regime mode (from any episode — same-mode transitions are
+exchangeable given z, so episode identity is a nuisance factor, not a
+constraint); its negatives are K transitions of a DIFFERENT mode, drawn
+across the whole minibatch and weighted toward the hardest
+(closest-in-(mass,friction)-space) different-mode rows. See
+`_sample_cpc_indices`. The regime-mode label rides on each replay row
+(`regime_mode`, from the `DEFAULT_MODES` mixture); with the flat-box task
+distribution (`modes=()`) the label is -1 and the sampler falls back to a
+pure normalized-distance rule (positive within `cpc_pos_tol`, negative
+beyond `cpc_neg_guard`). `regime_half` is still stored but no longer
+drives CPC.
 
 DESIGN CHOICE — the budget encoder's `x_exe` pooling set (§6) is, for a
 given minibatch row, that timestep's own (o_i, a_i) pairs pooled over
@@ -96,7 +103,7 @@ from ..encoders.encoder_losses import elbo_loss, infonce_cpc_loss
 from ..encoders.flow import ConditionalFlow
 from ..policies.execution_policy import ExecutionPolicy
 from ..policies.exploration_policy import ExplorationPolicy
-from .regime import apply_regime, sample_episode_schedule
+from .regime import apply_regime, regime_vector, sample_episode_schedule
 
 
 @dataclass
@@ -112,6 +119,7 @@ class Phase1Config:
     tau_polyak: float = 0.01
     tau_m: float = 0.99
     alpha_exp_init: float = 0.2
+    log_alpha_exp_min: float = -3.0   # floor on log alpha_exp (exp(-3) ~ 0.05); stops entropy collapse
     alpha_exe_init: float = 0.2
     eps_pos: float = 0.2
     beta_pos: float = 0.05
@@ -121,12 +129,21 @@ class Phase1Config:
     lambda_cpc: float = 1.0
     lambda_cov: float = 1e-3
     p_sw: float = 0.05
-    mass_range: tuple[float, float] = (0.8, 1.2)
-    friction_range: tuple[float, float] = (0.0, 0.15)
+    # span the DEFAULT_MODES mixture (icy..heavy); also used to normalize
+    # regime distance in the CPC negative sampler.
+    mass_range: tuple[float, float] = (0.65, 1.75)
+    friction_range: tuple[float, float] = (0.0, 0.45)
     eps_a_range: tuple[float, float] = (0.0, 0.3)
     buffer_capacity: int = 20_000
     batch_size: int = 64
     cpc_pool_size: int = 128
+    # CPC negative sampling (see `_sample_cpc_indices`). Negatives are drawn
+    # across the whole minibatch, stratified by regime mode, and weighted
+    # toward the hardest (closest-in-parameter-space) different-mode rows.
+    n_cpc_negatives: int = 16      # K in InfoNCE; the bound on I(z; mode) is ~log(K+1)
+    cpc_neg_guard: float = 0.15    # min normalized (mass,friction) distance for a pair to be a valid negative
+    cpc_neg_temp: float = 0.25     # exp(-d / temp) negative weighting; smaller -> sample harder negatives
+    cpc_pos_tol: float = 0.10      # flat-box fallback only: max normalized distance for a positive
     lr: float = 3e-4
 
 
@@ -234,13 +251,20 @@ class Phase1Trainer:
         t = 0
         for t in range(1, cfg.horizon + 1):
             regime_half = torch.zeros(n_agents, dtype=torch.long)
+            regime_mode = torch.full((n_agents,), -1, dtype=torch.long)
+            regime_vec = torch.zeros(n_agents, 2)
             for i, agent in enumerate(self.env.agents):
                 if t == schedule.switch_time[i].item():
                     apply_regime(agent, schedule.mu_2[i])
                     reset_mask = torch.zeros((n_envs, n_agents), dtype=torch.bool, device=self.device)
                     reset_mask[:, i] = True
                     posterior_state = self.posterior.reset_where(posterior_state, reset_mask)
-                regime_half[i] = 0 if t < schedule.switch_time[i].item() else 1
+                post = t >= schedule.switch_time[i].item()
+                regime_half[i] = 1 if post else 0
+                active = schedule.mu_2[i] if post else schedule.mu_1[i]
+                regime_vec[i] = torch.tensor(regime_vector(active))
+                if schedule.mode_1 is not None:
+                    regime_mode[i] = schedule.mode_2[i] if post else schedule.mode_1[i]
 
             with torch.no_grad():
                 actions = [self.exploration_policies[i].act(obs[i])[0] for i in range(n_agents)]
@@ -269,6 +293,8 @@ class Phase1Trainer:
 
             episode_id_field = torch.full((n_envs, n_agents), episode_id, dtype=torch.long)
             regime_half_field = regime_half.unsqueeze(0).expand(n_envs, n_agents).clone()
+            regime_mode_field = regime_mode.unsqueeze(0).expand(n_envs, n_agents).clone()
+            regime_vec_field = regime_vec.unsqueeze(0).expand(n_envs, n_agents, 2).clone()
             eps_a_field = torch.full((n_envs, n_agents), eps_a)
 
             row = dict(
@@ -282,6 +308,8 @@ class Phase1Trainer:
                 sigma2_new=sigma2_new,
                 episode_id=episode_id_field,
                 regime_half=regime_half_field,
+                regime_mode=regime_mode_field,
+                regime_vec=regime_vec_field,
                 eps_a=eps_a_field,
             )
             self.d_exp.add(**row)
@@ -307,30 +335,54 @@ class Phase1Trainer:
         self._polyak_update()
         return logs
 
-    def _sample_cpc_triplets(self, episode_id: torch.Tensor, regime_half: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor] | None:
-        """Indices into a flat (pool_size,) set: positive = same (episode,
-        half); negative = same episode, other half. episode_id/regime_half
-        are for one fixed agent (shape (pool_size,))."""
-        n = episode_id.shape[0]
-        same_ep = episode_id.unsqueeze(0) == episode_id.unsqueeze(1)
-        same_half = regime_half.unsqueeze(0) == regime_half.unsqueeze(1)
-        is_self = torch.eye(n, dtype=torch.bool)
+    def _sample_cpc_indices(self, mode: torch.Tensor, vec: torch.Tensor):
+        """Vectorized CPC index sampler for one agent's minibatch column.
 
-        pos_mask = same_ep & same_half & ~is_self
-        neg_mask = same_ep & ~same_half
+        `mode`: (B,) long regime-mode id per row (-1 if the flat-box task
+        distribution was used). `vec`: (B, 2) the row's (mass, friction).
 
-        anchors, positives, negatives = [], [], []
-        for a in range(n):
-            pos_candidates = pos_mask[a].nonzero(as_tuple=True)[0]
-            neg_candidates = neg_mask[a].nonzero(as_tuple=True)[0]
-            if len(pos_candidates) == 0 or len(neg_candidates) == 0:
-                continue
-            anchors.append(a)
-            positives.append(pos_candidates[torch.randint(len(pos_candidates), (1,))].item())
-            negatives.append(neg_candidates[torch.randint(len(neg_candidates), (1,))].item())
-        if not anchors:
+        Returns (anchors, pos_idx, neg_idx) with shapes (A,), (A,), (A, K),
+        or None if no row has both a positive and a negative. For each anchor:
+
+          * positive  = one row of the SAME regime mode (any episode; de
+            Finetti: same-mode transitions are exchangeable), chosen
+            uniformly. With no mode labels, any row within `cpc_pos_tol`
+            normalized distance.
+          * negatives = K rows of a DIFFERENT mode (or, unlabeled, any row
+            at least `cpc_neg_guard` away), sampled with probability
+            proportional to exp(-d / cpc_neg_temp) so the hardest
+            (closest-but-different) negatives dominate. The `cpc_neg_guard`
+            floor is unconditional: it removes false negatives from
+            overlapping / adjacent regimes.
+        """
+        cfg = self.cfg
+        B = mode.shape[0]
+        dev = mode.device
+        K = cfg.n_cpc_negatives
+
+        span = torch.tensor(
+            [cfg.mass_range[1] - cfg.mass_range[0], cfg.friction_range[1] - cfg.friction_range[0]],
+            device=dev,
+        ).clamp_min(1e-6)
+        d = torch.cdist(vec / span, vec / span)  # (B, B) normalized regime distance
+        eye = torch.eye(B, dtype=torch.bool, device=dev)
+
+        labelled = mode >= 0
+        pair_labelled = labelled.unsqueeze(0) & labelled.unsqueeze(1)
+        same_mode = mode.unsqueeze(0) == mode.unsqueeze(1)
+
+        pos_mask = ~eye & ((pair_labelled & same_mode) | (~pair_labelled & (d <= cfg.cpc_pos_tol)))
+        neg_mask = (d >= cfg.cpc_neg_guard) & ((pair_labelled & ~same_mode) | ~pair_labelled)
+
+        valid = pos_mask.any(1) & neg_mask.any(1)
+        if not valid.any():
             return None
-        return torch.tensor(anchors), torch.tensor(positives), torch.tensor(negatives)
+        anchors = valid.nonzero(as_tuple=True)[0]
+
+        pos_idx = torch.multinomial(pos_mask[anchors].float(), 1).squeeze(1)
+        w_neg = neg_mask[anchors].float() * torch.exp(-d[anchors] / cfg.cpc_neg_temp) + 1e-12
+        neg_idx = torch.multinomial(w_neg, K, replacement=True)  # (A, K)
+        return anchors, pos_idx, neg_idx
 
     def _flow_code(self, flow: ConditionalFlow, obs: torch.Tensor, action: torch.Tensor, next_obs: torch.Tensor, reward: torch.Tensor):
         cond = torch.cat([obs, action], dim=-1)
@@ -360,14 +412,14 @@ class Phase1Trainer:
             ).mean()
             elbo_total = elbo_total + elbo
 
-            triplet = self._sample_cpc_triplets(batch["episode_id"][:, i], batch["regime_half"][:, i])
-            if triplet is not None:
-                anchor_idx, pos_idx, neg_idx = triplet
+            idx = self._sample_cpc_indices(batch["regime_mode"][:, i], batch["regime_vec"][:, i])
+            if idx is not None:
+                anchor_idx, pos_idx, neg_idx = idx
                 with torch.no_grad():
                     pool_code, _ = self._flow_code(self.flow_momentum, obs_i, action_i, next_obs_i, reward_i)
-                z_query = code[anchor_idx]
-                z_positive = pool_code[pos_idx]
-                z_negatives = pool_code[neg_idx].unsqueeze(1)
+                z_query = code[anchor_idx]        # (A, d)    online encoder, carries grad
+                z_positive = pool_code[pos_idx]   # (A, d)    momentum encoder
+                z_negatives = pool_code[neg_idx]  # (A, K, d) momentum encoder
                 cpc_total = cpc_total + infonce_cpc_loss(z_query, z_positive, z_negatives, self.cpc_w).mean()
                 n_cpc_terms += 1
 
@@ -446,6 +498,11 @@ class Phase1Trainer:
         self.alpha_exp_optimizer.zero_grad()
         total_alpha_loss.backward()
         self.alpha_exp_optimizer.step()
+        # Floor the exploration entropy coefficient: in earlier runs it
+        # annealed to ~0.01 and the exploration policy went deterministic,
+        # so it stopped covering the arena and never found victims.
+        with torch.no_grad():
+            self.log_alpha_exp.clamp_(min=cfg.log_alpha_exp_min)
 
         return {
             "exp_critic_loss": total_critic_loss.item(),
