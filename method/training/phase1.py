@@ -141,7 +141,7 @@ class Phase1Config:
     # across the whole minibatch, stratified by regime mode, and weighted
     # toward the hardest (closest-in-parameter-space) different-mode rows.
     n_cpc_negatives: int = 16      # K in InfoNCE; the bound on I(z; mode) is ~log(K+1)
-    cpc_neg_guard: float = 0.15    # min normalized (mass,friction) distance for a pair to be a valid negative
+    cpc_neg_guard: float = 0.30    # min normalized (mass,friction) distance for a pair to be a valid negative
     cpc_neg_temp: float = 0.25     # exp(-d / temp) negative weighting; smaller -> sample harder negatives
     cpc_pos_tol: float = 0.10      # flat-box fallback only: max normalized distance for a positive
     lr: float = 3e-4

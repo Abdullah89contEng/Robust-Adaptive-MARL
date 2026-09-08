@@ -28,6 +28,7 @@ Pass `modes=()` to `sample_episode_schedule` to recover the old flat box
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 
 import torch
@@ -68,6 +69,16 @@ def regime_vector(regime: Regime) -> tuple[float, float]:
     return (regime.mass, regime.linear_friction)
 
 
+def regime_distance(a: Regime, b: Regime, mass_span: float, friction_span: float) -> float:
+    """L2 distance between two regimes in (mass, friction) space, each axis
+    normalized by its full range. Used to guarantee that a sampled switch
+    mu_1 -> mu_2 is an actual regime change, not two draws from the same blob."""
+    return math.hypot(
+        (a.mass - b.mass) / max(mass_span, 1e-6),
+        (a.linear_friction - b.linear_friction) / max(friction_span, 1e-6),
+    )
+
+
 def sample_regime(mass_range: tuple[float, float], friction_range: tuple[float, float], rng: torch.Generator | None = None) -> Regime:
     mass = torch.empty(1).uniform_(*mass_range, generator=rng).item()
     friction = torch.empty(1).uniform_(*friction_range, generator=rng).item()
@@ -81,6 +92,36 @@ def sample_regime_from_modes(modes: tuple[RegimeMode, ...], rng: torch.Generator
     k = int(torch.multinomial(weights, 1, generator=rng).item())
     mode = modes[k]
     return sample_regime(mode.mass_range, mode.friction_range, rng), k
+
+
+DEFAULT_MIN_SWITCH_DIST = 0.35
+
+
+def sample_far_regime(
+    mu_1: Regime,
+    mode_1: int,
+    modes: tuple[RegimeMode, ...],
+    mass_span: float,
+    friction_span: float,
+    min_switch_dist: float = DEFAULT_MIN_SWITCH_DIST,
+    rng: torch.Generator | None = None,
+    max_tries: int = 25,
+) -> tuple[Regime, int]:
+    """Draw a post-switch regime that is a *genuine* change from ``mu_1``:
+    a different mixture mode (when the mixture has >= 2 components) AND at
+    least ``min_switch_dist`` away in range-normalized (mass, friction)
+    space. Rejection-samples up to ``max_tries``; the disjoint DEFAULT_MODES
+    boundaries can still sit closer than the threshold, so the distance
+    check is not redundant with the mode check. Returns (regime, mode_index).
+    """
+    multi = len(modes) >= 2
+    r2, k2 = sample_regime_from_modes(modes, rng)
+    for _ in range(max_tries):
+        mode_ok = (not multi) or (k2 != mode_1)
+        if mode_ok and regime_distance(mu_1, r2, mass_span, friction_span) >= min_switch_dist:
+            return r2, k2
+        r2, k2 = sample_regime_from_modes(modes, rng)
+    return r2, k2
 
 
 def apply_regime(agent: Agent, regime: Regime) -> None:
@@ -110,32 +151,60 @@ def sample_episode_schedule(
     friction_range: tuple[float, float],
     rng: torch.Generator | None = None,
     modes: tuple[RegimeMode, ...] | None = None,
+    min_switch_dist: float = DEFAULT_MIN_SWITCH_DIST,
 ) -> EpisodeRegimeSchedule:
     """for each agent i: mu_1i, mu_2i ~ p(mu); vartheta_i ~ GEOM(p_sw);
     vartheta_i_tilde = min(vartheta_i, H)  (§2).
 
     p(mu) is the `modes` mixture (default `DEFAULT_MODES`); pass `modes=()`
     to use the flat U(mass_range) x U(friction_range) box instead.
+
+    SEPARATION GUARANTEE: for every agent that *actually switches within the
+    horizon* (vartheta_i_tilde < H), mu_2 is resampled until it is (a) a
+    different mixture mode than mu_1 and (b) at least `min_switch_dist` away
+    in range-normalized (mass, friction) space. Two independent draws from a
+    3-mode mixture land in the same mode ~1/3 of the time; without this a
+    labelled "switch" is often no dynamics change at all, which is noise for
+    both the encoder and the change-point detector. Agents that do not
+    switch (vartheta_i_tilde == H) are left untouched -- mu_2 is never
+    applied for them.
     """
     if modes is None:
         modes = DEFAULT_MODES
+    mass_span = mass_range[1] - mass_range[0]
+    fric_span = friction_range[1] - friction_range[0]
 
-    if modes:
-        drawn_1 = [sample_regime_from_modes(modes, rng) for _ in range(n_agents)]
-        drawn_2 = [sample_regime_from_modes(modes, rng) for _ in range(n_agents)]
-        mu_1 = [r for r, _ in drawn_1]
-        mu_2 = [r for r, _ in drawn_2]
-        mode_1 = torch.tensor([k for _, k in drawn_1], dtype=torch.long)
-        mode_2 = torch.tensor([k for _, k in drawn_2], dtype=torch.long)
-    else:
-        mu_1 = [sample_regime(mass_range, friction_range, rng) for _ in range(n_agents)]
-        mu_2 = [sample_regime(mass_range, friction_range, rng) for _ in range(n_agents)]
-        mode_1 = torch.full((n_agents,), -1, dtype=torch.long)
-        mode_2 = torch.full((n_agents,), -1, dtype=torch.long)
-
-    # torch has no direct Geometric sampler taking a generator kwarg pre-2.x-consistently;
-    # invert the CDF of Geometric(p_sw) supported on {1, 2, ...} from a uniform draw instead.
+    # switch times first, so the separation guarantee is only enforced where
+    # a switch actually occurs.
     u = torch.empty(n_agents).uniform_(1e-6, 1.0, generator=rng)
     vartheta = torch.ceil(torch.log(u) / torch.log(torch.tensor(1.0 - p_sw))).long().clamp(min=1)
     switch_time = torch.clamp(vartheta, max=horizon)
+    switches = (switch_time < horizon).tolist()
+
+    if modes:
+        drawn_1 = [sample_regime_from_modes(modes, rng) for _ in range(n_agents)]
+        mu_1 = [r for r, _ in drawn_1]
+        mode_1 = torch.tensor([k for _, k in drawn_1], dtype=torch.long)
+        mu_2, mode_2 = [], []
+        for i in range(n_agents):
+            if switches[i]:
+                r2, k2 = sample_far_regime(mu_1[i], int(mode_1[i]), modes, mass_span, fric_span, min_switch_dist, rng)
+            else:
+                r2, k2 = sample_regime_from_modes(modes, rng)  # unused (mu_2 never applied)
+            mu_2.append(r2)
+            mode_2.append(k2)
+        mode_2 = torch.tensor(mode_2, dtype=torch.long)
+    else:
+        mu_1 = [sample_regime(mass_range, friction_range, rng) for _ in range(n_agents)]
+        mu_2 = []
+        for i in range(n_agents):
+            r2 = sample_regime(mass_range, friction_range, rng)
+            for _ in range(50):
+                if not switches[i] or regime_distance(mu_1[i], r2, mass_span, fric_span) >= min_switch_dist:
+                    break
+                r2 = sample_regime(mass_range, friction_range, rng)
+            mu_2.append(r2)
+        mode_1 = torch.full((n_agents,), -1, dtype=torch.long)
+        mode_2 = torch.full((n_agents,), -1, dtype=torch.long)
+
     return EpisodeRegimeSchedule(mu_1=mu_1, mu_2=mu_2, switch_time=switch_time, mode_1=mode_1, mode_2=mode_2)

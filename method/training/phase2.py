@@ -29,7 +29,7 @@ import random
 
 from ..detector.indid import CausalLocalWindowTransformer, detection_loss
 from .phase1 import Phase1Trainer
-from .regime import DEFAULT_MODES, apply_regime, sample_episode_schedule, sample_regime_from_modes
+from .regime import DEFAULT_MODES, apply_regime, sample_episode_schedule, sample_far_regime
 
 
 @dataclass
@@ -106,8 +106,13 @@ class Phase2Trainer:
         # Rebalance the supervision: a fixed fraction of episodes have NO
         # switch (switch_time == H sentinel, mu_2 == mu_1); the rest get a
         # switch time drawn UNIFORMLY over the usable window (not GEOM,
-        # which piles every positive near step ~20), and mu_2 is forced to
-        # a different dynamics mode than mu_1 so the labelled change is real.
+        # which piles every positive near step ~20). Because this path
+        # OVERRIDES switch_time, sample_episode_schedule's own separation
+        # guarantee (which only fires where the GEOM draw already produced a
+        # switch) does not cover every agent here -- so re-draw mu_2 with
+        # the same guarantee (different mode AND >= min-distance from mu_1).
+        ms = p1_cfg.mass_range[1] - p1_cfg.mass_range[0]
+        fs = p1_cfg.friction_range[1] - p1_cfg.friction_range[0]
         if random.random() < self.cfg.p_no_change:
             schedule.mu_2 = list(schedule.mu_1)
             schedule.switch_time = torch.full((n_agents,), H, dtype=torch.long)
@@ -117,15 +122,14 @@ class Phase2Trainer:
             lo = self.cfg.window + 4
             hi = max(lo + 1, H - 8)
             schedule.switch_time = torch.randint(lo, hi, (n_agents,))
+            mode_2 = schedule.mode_2.clone() if schedule.mode_2 is not None else None
             for i in range(n_agents):
-                same_mode = schedule.mode_1 is not None and int(schedule.mode_2[i]) == int(schedule.mode_1[i])
-                if same_mode or schedule.mode_1 is None:
-                    m1 = int(schedule.mode_1[i]) if schedule.mode_1 is not None else -1
-                    others = [k for k in range(len(DEFAULT_MODES)) if k != m1]
-                    k = random.choice(others)
-                    schedule.mu_2[i] = sample_regime_from_modes((DEFAULT_MODES[k],))[0]
-                    if schedule.mode_2 is not None:
-                        schedule.mode_2[i] = k
+                m1 = int(schedule.mode_1[i]) if schedule.mode_1 is not None else -1
+                r2, k2 = sample_far_regime(schedule.mu_1[i], m1, DEFAULT_MODES, ms, fs)
+                schedule.mu_2[i] = r2
+                if mode_2 is not None:
+                    mode_2[i] = k2
+            schedule.mode_2 = mode_2
 
         for i, agent in enumerate(env.agents):
             apply_regime(agent, schedule.mu_1[i])
