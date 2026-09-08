@@ -90,6 +90,11 @@ class MetaTestRunner:
         self.device = device or phase1_trainer.device
         self.n_agents = phase1_trainer.n_agents
 
+        # The detector may consume RAW transitions (o, a, r, o') rather than
+        # the flow code c_{i,t}; tell which from its input width.
+        self._raw_dim = 2 * self.p1.obs_dim + self.p1.action_dim + 1
+        self.detector_raw = self.detector.input_proj.in_features == self._raw_dim
+
         # Freeze everything -- meta-test performs no gradient updates at all.
         modules = [
             self.p1.flow,
@@ -203,15 +208,20 @@ class MetaTestRunner:
         next_obs, rewards, dones, _infos = self.env.step(actions)
 
         with torch.no_grad():
-            cond = torch.cat([torch.stack(list(self.obs), dim=1), torch.stack(actions, dim=1)], dim=-1)
-            y = torch.cat([torch.stack(rewards, dim=1).unsqueeze(-1), torch.stack(list(next_obs), dim=1)], dim=-1)
+            obs_stack = torch.stack(list(self.obs), dim=1)
+            act_stack = torch.stack(actions, dim=1)
+            nobs_stack = torch.stack(list(next_obs), dim=1)
+            rew_stack = torch.stack(rewards, dim=1).unsqueeze(-1)
+            cond = torch.cat([obs_stack, act_stack], dim=-1)
+            y = torch.cat([rew_stack, nobs_stack], dim=-1)
             codes, _ = self.p1.flow(y, cond)  # (1, n_agents, code_dim)
+            det_feat = torch.cat([obs_stack, act_stack, rew_stack, nobs_stack], dim=-1) if self.detector_raw else codes
 
             for i in range(self.n_agents):
                 agent_mask = torch.tensor([[j == i for j in range(self.n_agents)]], device=self.device)
                 self.posterior_state = self.p1.posterior.step_where(self.posterior_state, codes, agent_mask)
 
-                self.code_history[i].append(codes[:, i])  # each (1, code_dim)
+                self.code_history[i].append(det_feat[:, i])  # each (1, feat_dim)
                 if len(self.code_history[i]) > self.detector.window:
                     self.code_history[i] = self.code_history[i][-self.detector.window :]
                 code_seq_i = torch.stack(self.code_history[i], dim=1)  # (1, min(t, window), code_dim)

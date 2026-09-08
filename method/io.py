@@ -131,16 +131,15 @@ def load_phase1(ckpt_path: str | Path, *, scenario_factory=None,
 # --------------------------------------------------------------------------
 def _detector_dims_from_state(sd: dict) -> dict:
     """Infer architecture dims from the detector state_dict so the rebuilt
-    module always matches the file, even if Phase2Config drifted."""
+    module always matches the file, even if Phase2Config drifted. The
+    detector is a causal local-window Transformer encoder (Algorithm 10.2)
+    with an input Linear projection; there is no position embedding."""
     d_model, code_dim = sd["input_proj.weight"].shape
-    return dict(
-        code_dim=int(code_dim),
-        d_model=int(d_model),
-        max_len=int(sd["pos_embedding"].shape[1]),
-        n_layers=1 + max(int(k.split(".")[2]) for k in sd
-                         if k.startswith("transformer.layers.")),
-        dim_feedforward=int(sd["transformer.layers.0.linear1.weight"].shape[0]),
-    )
+    n_layers = 1 + max(int(k.split(".")[2]) for k in sd
+                       if k.startswith("transformer.layers."))
+    dim_feedforward = int(sd["transformer.layers.0.linear1.weight"].shape[0])
+    return dict(code_dim=int(code_dim), d_model=int(d_model),
+                n_layers=int(n_layers), dim_feedforward=int(dim_feedforward))
 
 
 def load_detector(detector_path: str | Path, *, phase1_trainer: Phase1Trainer | None = None,
@@ -165,9 +164,16 @@ def load_detector(detector_path: str | Path, *, phase1_trainer: Phase1Trainer | 
     det = CausalLocalWindowTransformer(
         code_dim=dims["code_dim"], d_model=dims["d_model"], n_heads=cfg.n_heads,
         n_layers=dims["n_layers"], window=cfg.window,
-        dim_feedforward=dims["dim_feedforward"], max_len=dims["max_len"],
+        dim_feedforward=dims["dim_feedforward"],
     ).to(device)
-    det.load_state_dict(sd)
+    # strict=False so detectors saved before the input-normalization buffers
+    # (feat_mean/feat_var/feat_count) were added still load -- they just keep
+    # the identity normalization, which is what a code-input detector used
+    # implicitly anyway.
+    missing, unexpected = det.load_state_dict(sd, strict=False)
+    norm_keys = {"feat_mean", "feat_var", "feat_count"}
+    if set(missing) - norm_keys or unexpected:
+        raise RuntimeError(f"detector state_dict mismatch: missing={missing} unexpected={unexpected}")
     if freeze:
         det.eval()
         for p in det.parameters():

@@ -34,28 +34,28 @@ from .regime import DEFAULT_MODES, apply_regime, sample_episode_schedule, sample
 
 @dataclass
 class Phase2Config:
+    # Backbone: causal local-window Transformer (Algorithm 10.2). `window`
+    # is the attention span AND the deployment history cap.
     d_model: int = 64
     n_heads: int = 4
     n_layers: int = 2
-    window: int = 16
-    # The InDiD delay/FA loss alone is unbalanced on this task: with
-    # lambda_fa >= 1 "never fire" is the global optimum even when the code
-    # stream carries a strong change signal (probe AUC ~0.8) -- missing a
-    # real change costs less delay than the FA term saves. Fix: a direct
-    # per-step BCE against the ground-truth "has switched" label carries the
-    # supervision, the InDiD terms only shape delay/FA around it, and
-    # lambda_fa is dropped well below 1.
-    bce_weight: float = 1.0
-    lambda_fa: float = 0.5
-    p_no_change: float = 0.35      # fraction of episodes with NO regime switch (stationary negatives)
-    warmup_p_reg: float = 0.05     # penalty on mean p over the first `window` steps
-    # 3e-4 (a common default elsewhere in this codebase) reliably diverges
-    # this transformer to NaN within ~20-60 iterations -- verified directly
-    # by inspecting detector.parameters() every iteration. 1e-4 ran 150
-    # iterations with zero non-finite batches and a cleanly decreasing
-    # loss; the train_iteration()'s skip-on-non-finite-gradient guard stays
-    # as defense in depth, not as the primary fix.
-    lr: float = 1e-4
+    dim_feedforward: int = 128
+    window: int = 48
+    # "raw" -> detector runs on the transition (o, a, r, o'), where the
+    # change is strongly visible (probe AUC ~0.8-0.9); "code" -> frozen
+    # f_phi embedding c_{i,t}.
+    detector_input: str = "raw"
+    # InDiD CPDLoss (third-party/InDiD/utils/loss.py): segment length T
+    # (paper: 5..32), delay weighted alpha = 2*batch/T, FA at beta = 1;
+    # Adam lr 1e-3, no gradient clipping.
+    len_segment: int = 32
+    # Reproduce the reference's batch of ~64 sequences: stack this many
+    # rollouts and merge the (env, agent) axes before one loss/step
+    # (4 x 8 envs x 2 agents = 64).
+    rollouts_per_step: int = 4
+    p_no_change: float = 0.35   # fraction of episodes with NO regime switch (stationary negatives)
+    grad_clip_norm: float = 0.0  # 0 = off, matching InDiD's grad_clip: 0.0
+    lr: float = 1e-3
 
 
 class Phase2Trainer:
@@ -74,13 +74,18 @@ class Phase2Trainer:
             for p in module.parameters():
                 p.requires_grad_(False)
 
+        self.detector_input = config.detector_input
+        obs_dim, act_dim = self.phase1.obs_dim, self.phase1.action_dim
+        self.raw_dim = obs_dim + act_dim + 1 + obs_dim   # (o, a, r, o')
+        feat_dim = self.raw_dim if self.detector_input == "raw" else self.phase1.code_dim
+
         self.detector = CausalLocalWindowTransformer(
-            code_dim=self.phase1.code_dim,
+            code_dim=feat_dim,
             d_model=config.d_model,
             n_heads=config.n_heads,
             n_layers=config.n_layers,
             window=config.window,
-            max_len=self.phase1.cfg.horizon + 1,
+            dim_feedforward=config.dim_feedforward,
         ).to(self.device)
         self.optimizer = torch.optim.Adam(self.detector.parameters(), lr=config.lr)
 
@@ -119,8 +124,7 @@ class Phase2Trainer:
             if schedule.mode_2 is not None:
                 schedule.mode_2 = schedule.mode_1.clone()
         else:
-            lo = self.cfg.window + 4
-            hi = max(lo + 1, H - 8)
+            lo, hi = 10, max(11, H - 10)   # switch lands well inside the episode
             schedule.switch_time = torch.randint(lo, hi, (n_agents,))
             mode_2 = schedule.mode_2.clone() if schedule.mode_2 is not None else None
             for i in range(n_agents):
@@ -135,7 +139,7 @@ class Phase2Trainer:
             apply_regime(agent, schedule.mu_1[i])
         obs = env.reset()
 
-        codes_over_time = []
+        feat_over_time = []
         t = 0
         for t in range(1, p1_cfg.horizon + 1):
             for i, agent in enumerate(env.agents):
@@ -149,76 +153,52 @@ class Phase2Trainer:
             joint_action = torch.stack(actions, dim=1)
             joint_next_obs = torch.stack(next_obs, dim=1)
             joint_reward = torch.stack(rewards, dim=1)
-            cond = torch.cat([joint_obs, joint_action], dim=-1)
-            y = torch.cat([joint_reward.unsqueeze(-1), joint_next_obs], dim=-1)
-            codes, _ = self.phase1.flow(y, cond)  # (n_envs, n_agents, code_dim)
-            codes_over_time.append(codes)
-
+            if self.detector_input == "raw":
+                feat = torch.cat([joint_obs, joint_action, joint_reward.unsqueeze(-1), joint_next_obs], dim=-1)
+            else:
+                cond = torch.cat([joint_obs, joint_action], dim=-1)
+                y = torch.cat([joint_reward.unsqueeze(-1), joint_next_obs], dim=-1)
+                feat, _ = self.phase1.flow(y, cond)  # (n_envs, n_agents, code_dim)
+            feat_over_time.append(feat)
             obs = next_obs
-            if bool(dones.all()):
-                break
+            # NB: no early `done` break -- the detector needs full-length
+            # labeled sequences with a real post-switch segment (episodes
+            # otherwise end when the agents rescue everyone, often before the
+            # scheduled switch, leaving nothing to detect).
 
-        codes_seq = torch.stack(codes_over_time, dim=2)  # (n_envs, n_agents, T, code_dim)
+        feat_seq = torch.stack(feat_over_time, dim=2)  # (n_envs, n_agents, T, feat_dim)
         switch_time = schedule.switch_time.clamp(max=t).to(self.device)
-        return codes_seq, switch_time
+        return feat_seq, switch_time
 
     def train_iteration(self) -> dict[str, float]:
-        codes_seq, switch_time = self.collect_labeled_episode()
-        n_envs, n_agents, _T, _code_dim = codes_seq.shape
+        # Accumulate several rollouts and merge the (env, agent) axes into
+        # one batch so the loss sees ~64 sequences, matching InDiD's batch.
+        feats, sws = [], []
+        for _ in range(self.cfg.rollouts_per_step):
+            fs, st = self.collect_labeled_episode()      # (n_envs, n_agents, T, D), (n_agents,)
+            ne, na, T, D = fs.shape
+            feats.append(fs.reshape(ne * na, T, D))
+            sws.append(st.unsqueeze(0).expand(ne, na).reshape(ne * na))
+        feat_batch = torch.cat(feats, 0)                 # (B, T, D)
+        sw_batch = torch.cat(sws, 0)                     # (B,)
+        self.detector.update_norm(feat_batch)            # online analogue of InDiD's offline z-norm
 
-        total_loss = torch.tensor(0.0, device=self.device)
-        w = self.detector.window
-        for i in range(n_agents):
-            p_i = self.detector(codes_seq[:, i])  # (n_envs, T)
-            T = p_i.shape[1]
-            switch_time_i = switch_time[i].expand(n_envs)
-            total_loss = total_loss + detection_loss(p_i, switch_time_i, self.cfg.lambda_fa).mean()
-
-            # direct per-step supervision: label = 1 once the regime has
-            # switched (all-zero for no-switch episodes). This is the term
-            # that actually anchors the detector; it cannot be minimized by
-            # p == 0 (that is punished on every post-switch step).
-            t_idx = torch.arange(T, device=p_i.device)
-            sw = torch.where(switch_time_i < T, switch_time_i, torch.full_like(switch_time_i, T + 1))
-            label = (t_idx.unsqueeze(0) >= (sw.unsqueeze(1) - 1)).float()
-            bce = torch.nn.functional.binary_cross_entropy(p_i.clamp(1e-4, 1 - 1e-4), label)
-            total_loss = total_loss + self.cfg.bce_weight * bce
-
-            # keep the detector quiet during its warm-up window (incomplete context)
-            total_loss = total_loss + self.cfg.warmup_p_reg * p_i[:, :w].mean()
+        p = self.detector(feat_batch)                    # (B, T)
+        total_loss = detection_loss(p, sw_batch, self.cfg.len_segment)
 
         self.optimizer.zero_grad()
         total_loss.backward()
-        # Gradient clipping alone is not enough here and was verified
-        # insufficient directly: an isolated batch's loss occasionally goes
-        # NaN on its own (confirmed via direct inspection -- the detector's
-        # own p outputs stayed finite and unsaturated for every iteration
-        # leading up to the failure, so this isn't sigmoid saturation
-        # feeding the log-survival trick's clamp). clip_grad_norm_ computes
-        # a single scalar norm over *all* parameters' gradients together, so
-        # one NaN component makes that norm (and therefore the rescaling
-        # applied to every other parameter) NaN too -- one bad batch
-        # poisons every parameter's gradient. Adam's internal moving
-        # averages (exp_avg/exp_avg_sq) then absorb that NaN and never
-        # recover, even once later batches are fine again -- confirmed
-        # directly: loss went transiently NaN, then finite again for one
-        # iteration, then permanently NaN once the optimizer stepped a
-        # second time. Skipping the step entirely on a non-finite batch
-        # (standard practice for exactly this failure mode) avoids ever
-        # touching the optimizer state with it.
-        # Per-element clip first: one exploded component can no longer poison
-        # the global norm below (and therefore every other parameter's
-        # rescaled gradient) before the finiteness check gets to see it.
-        torch.nn.utils.clip_grad_value_(self.detector.parameters(), clip_value=5.0)
-        grad_norm = torch.nn.utils.clip_grad_norm_(self.detector.parameters(), max_norm=1.0)
+        # InDiD trains with grad_clip: 0.0 (none). We keep an OPTIONAL norm
+        # clip (off by default) plus a skip-on-non-finite guard, because our
+        # rollout data is noisier than InDiD's clean synthetic sequences and
+        # a single bad batch can otherwise poison Adam's moments permanently.
+        if self.cfg.grad_clip_norm > 0:
+            grad_norm = torch.nn.utils.clip_grad_norm_(self.detector.parameters(), self.cfg.grad_clip_norm)
+        else:
+            grad_norm = torch.nn.utils.clip_grad_norm_(self.detector.parameters(), float("inf"))
         if torch.isfinite(grad_norm) and torch.isfinite(total_loss):
             self.optimizer.step()
         else:
-            # Skipping the step is not enough on its own: Adam's exp_avg /
-            # exp_avg_sq can already hold a NaN from an earlier step and never
-            # recover. Clearing the optimizer state makes a transient bad
-            # batch fully recoverable -- the moments just rebuild from the
-            # next finite gradients.
             self.optimizer.zero_grad()
             self.optimizer.state.clear()
         return {"l_cpd": total_loss.item(), "grad_norm": grad_norm.item()}
