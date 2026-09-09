@@ -400,7 +400,7 @@ class Phase1Trainer:
 
     def _update_representation(self) -> dict[str, float]:
         cfg = self.cfg
-        batch = self.d_exp.sample(cfg.batch_size)  # fields: (B, n_agents, ...)
+        batch = self.d_exp.sample(cfg.batch_size, device=self.device)  # fields: (B, n_agents, ...)
 
         elbo_total = 0.0
         cpc_total = torch.tensor(0.0, device=self.device)
@@ -466,7 +466,7 @@ class Phase1Trainer:
 
     def _update_exploration(self) -> dict[str, float]:
         cfg = self.cfg
-        batch = self.d_exp.sample(cfg.batch_size)
+        batch = self.d_exp.sample(cfg.batch_size, device=self.device)
 
         # Pass 1: critic update. Must fully backward+step before the policy
         # pass below builds any graph through these same critic parameters —
@@ -560,7 +560,7 @@ class Phase1Trainer:
 
     def _update_execution(self) -> dict[str, float]:
         cfg = self.cfg
-        batch = self.d_exe.sample(cfg.batch_size)
+        batch = self.d_exe.sample(cfg.batch_size, device=self.device)
         obs, action, next_obs = batch["obs"], batch["action"], batch["next_obs"]
         team_reward = batch["reward"].mean(dim=1)  # shared team reward for Q_tot's TD target
         belief = self._belief_for_batch(batch)

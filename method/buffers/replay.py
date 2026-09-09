@@ -58,11 +58,16 @@ class ReplayBuffer:
         self._ptr = end % self.capacity
         self._size = min(self._size + n, self.capacity)
 
-    def sample(self, batch_size: int, generator: torch.Generator | None = None) -> dict[str, torch.Tensor]:
+    def sample(self, batch_size: int, generator: torch.Generator | None = None,
+               device: torch.device | str | None = None) -> dict[str, torch.Tensor]:
         if self._size == 0:
             raise RuntimeError("Cannot sample from an empty replay buffer")
         indices = torch.randint(0, self._size, (batch_size,), generator=generator)
-        return {name: tensor[indices] for name, tensor in self._storage.items()}
+        # Storage is kept on CPU host RAM; move only the drawn minibatch
+        # (models / sim may be on cuda).
+        if device is None:
+            return {name: tensor[indices] for name, tensor in self._storage.items()}
+        return {name: tensor[indices].to(device) for name, tensor in self._storage.items()}
 
     def is_ready(self, batch_size: int) -> bool:
         return self._size >= batch_size
