@@ -62,8 +62,8 @@ def parse_args():
                    help="Phase-2 CPD objective: 'paper' (arXiv:2510.24988v1 BCE) or 'indid' (InDiD CPDLoss)")
     p.add_argument("--randomize-map", action="store_true",
                    help="re-randomize obstacle/victim/agent positions each episode (boundary fixed)")
-    p.add_argument("--device", type=str, default="cpu",
-                   help="torch device for models AND the vectorized sim: cpu | cuda | cuda:N")
+    p.add_argument("--device", type=str, default="auto",
+                   help="torch device for models AND the vectorized sim: auto (default: cuda if available, else cpu) | cpu | cuda | cuda:N")
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--out-dir", type=str, default=None)
     return p.parse_args()
@@ -92,7 +92,10 @@ def main():
     if args.device.startswith("cuda") and not torch.cuda.is_available():
         raise SystemExit("--device %s requested but torch.cuda.is_available() is False; "
                          "install a CUDA build of torch on a machine with an NVIDIA GPU" % args.device)
+    if args.device == "auto":
+        args.device = "cuda" if torch.cuda.is_available() else "cpu"
     dev = torch.device(args.device)
+    print("device:", dev)
 
     ckpt_path = Path(args.phase1_ckpt).resolve()
     prev_args = json.loads((ckpt_path.parent / "args.json").read_text())

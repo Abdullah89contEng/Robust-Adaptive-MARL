@@ -41,10 +41,13 @@ EVAL_ROLLOUTS = _E("EV", 4)    # x8 envs = 32 change + 32 no-change traces
 EVAL_H       = 140
 CHANGE_STEP  = 40
 NORMAL, HEAVY = Regime(1.10, 0.16), Regime(1.52, 0.36)
-DEVICE       = os.environ.get("DEVICE", "cpu")   # cpu | cuda | cuda:N (models + vectorized sim)
+DEVICE       = os.environ.get("DEVICE", "auto")  # auto (cuda if available, else cpu) | cpu | cuda | cuda:N
+if DEVICE == "auto":
+    DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 if DEVICE.startswith("cuda") and not torch.cuda.is_available():
     raise SystemExit("DEVICE=%s requested but torch.cuda.is_available() is False" % DEVICE)
 _dev = torch.device(DEVICE)
+print("device:", _dev)
 
 CKPT_KEYS = ["flow", "flow_momentum", "budget_encoder", "budget_decoder",
              "exploration_policies", "exploration_critics", "exploration_critics_target",
