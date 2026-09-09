@@ -163,9 +163,33 @@ class Scenario(BaseScenario):
 
 		return world
 
-	def reset_world_at(self, env_index: int | None = None):
+	def _place_map_entities(self, batch_index, offset, zero_pos, zero_rot):
+		"""Write the current ``self.map`` layout onto the VMAS entities for
+		one env (``batch_index`` an int) or, when it is None, every env."""
 		obstacle_count = len(self.map.obstacles)
 		agent_count = len(self.map.agents)
+		for landmark, obs in zip(self.world.landmarks[:obstacle_count], self.map.obstacles):
+			landmark.set_pos(pos=obs.position.to(self.world.device) - offset, batch_index=batch_index)
+			landmark.set_vel(vel=zero_pos, batch_index=batch_index)
+			landmark.set_rot(
+				rot=torch.tensor([obs.angle], device=self.world.device),
+				batch_index=batch_index,
+			)
+			landmark.set_ang_vel(ang_vel=zero_rot, batch_index=batch_index)
+
+		for agent, ag in zip(self.world.agents[:agent_count], self.map.agents):
+			agent.set_pos(pos=ag.position.to(self.world.device) - offset, batch_index=batch_index)
+			agent.set_vel(vel=zero_pos, batch_index=batch_index)
+			agent.set_rot(rot=zero_rot, batch_index=batch_index)
+			agent.set_ang_vel(ang_vel=zero_rot, batch_index=batch_index)
+
+		for survival, sur in zip(self._survivals, self.map.survivals):
+			survival.set_pos(pos=sur.position.to(self.world.device) - offset, batch_index=batch_index)
+			survival.set_vel(vel=zero_pos, batch_index=batch_index)
+			survival.set_rot(rot=zero_rot, batch_index=batch_index)
+			survival.set_ang_vel(ang_vel=zero_rot, batch_index=batch_index)
+
+	def reset_world_at(self, env_index: int | None = None):
 		offset = torch.tensor(
 			[self.map.width / 2.0, self.map.height / 2.0],
 			device=self.world.device,
@@ -173,33 +197,28 @@ class Scenario(BaseScenario):
 		zero_pos = torch.zeros(2, device=self.world.device)
 		zero_rot = torch.zeros(1, device=self.world.device)
 
-		# Preserve the map's reset behaviour while keeping VMAS entities intact.
-		if env_index is None:
-			if self.randomize_map:
-				self.map.reshuffle_positions()
+		# Layout. With ``randomize_map`` every batched env gets its OWN
+		# independent interior layout (obstacles + victims + agents) inside
+		# the same fixed boundary: a full reset (env_index is None) draws
+		# ``batch_dim`` of them, one per env. VMAS calls this once per
+		# env.reset() (Environment._reset -> env_reset_world_at(None)), so
+		# the per-env loop lives here. Without randomize_map: the original
+		# behaviour -- fixed obstacles/victims, agents respawned once and
+		# broadcast to every env.
+		if self.randomize_map:
+			if env_index is None:
+				for i in range(self.world.batch_dim):
+					self.map.reshuffle_positions()
+					self._place_map_entities(i, offset, zero_pos, zero_rot)
 			else:
+				self.map.reshuffle_positions()
+				self._place_map_entities(env_index, offset, zero_pos, zero_rot)
+		else:
+			if env_index is None:
 				self.map.reset_agents()
+			self._place_map_entities(env_index, offset, zero_pos, zero_rot)
 
-		for landmark, obs in zip(self.world.landmarks[:obstacle_count], self.map.obstacles):
-			landmark.set_pos(pos=obs.position.to(self.world.device) - offset, batch_index=env_index)
-			landmark.set_vel(vel=zero_pos, batch_index=env_index)
-			landmark.set_rot(
-				rot=torch.tensor([obs.angle], device=self.world.device),
-				batch_index=env_index,
-			)
-			landmark.set_ang_vel(ang_vel=zero_rot, batch_index=env_index)
-
-		for agent, ag in zip(self.world.agents[:agent_count], self.map.agents):
-			agent.set_pos(pos=ag.position.to(self.world.device) - offset, batch_index=env_index)
-			agent.set_vel(vel=zero_pos, batch_index=env_index)
-			agent.set_rot(rot=zero_rot, batch_index=env_index)
-			agent.set_ang_vel(ang_vel=zero_rot, batch_index=env_index)
-
-		for survival, sur in zip(self._survivals, self.map.survivals):
-			survival.set_pos(pos=sur.position.to(self.world.device) - offset, batch_index=env_index)
-			survival.set_vel(vel=zero_pos, batch_index=env_index)
-			survival.set_rot(rot=zero_rot, batch_index=env_index)
-			survival.set_ang_vel(ang_vel=zero_rot, batch_index=env_index)
+		for survival in self._survivals:
 			if env_index is None:
 				survival.health[:] = survival.initial_health
 				survival.rescued[:] = False
