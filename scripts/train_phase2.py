@@ -57,6 +57,8 @@ def parse_args():
     p.add_argument("--phase1-ckpt", type=str, required=True)
     p.add_argument("--phase2-iters", type=int, default=300)
     p.add_argument("--log-every", type=int, default=20)
+    p.add_argument("--detector-loss", type=str, default="paper", choices=["paper", "indid"],
+                   help="Phase-2 CPD objective: 'paper' (arXiv:2510.24988v1 BCE) or 'indid' (InDiD CPDLoss)")
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--out-dir", type=str, default=None)
     return p.parse_args()
@@ -106,7 +108,7 @@ def main():
     load_phase1(trainer1, ckpt_path)
     print(f"n_agents={trainer1.n_agents} obs_dim={trainer1.obs_dim} code_dim={trainer1.code_dim}")
 
-    p2_config = Phase2Config()
+    p2_config = Phase2Config(detector_loss=args.detector_loss)
     print(f"Phase2Config: {p2_config}")
     trainer2 = Phase2Trainer(trainer1, p2_config)
 

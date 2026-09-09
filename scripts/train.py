@@ -42,6 +42,8 @@ def parse_args():
     p.add_argument("--config-file", type=str, default="world_config.yaml")
     p.add_argument("--shaping-weight", type=float, default=0.0,
                    help="potential-based reward shaping toward nearest unrescued victim (0 = off)")
+    p.add_argument("--detector-loss", type=str, default="paper", choices=["paper", "indid"],
+                   help="Phase-2 CPD objective: 'paper' (arXiv:2510.24988v1 BCE) or 'indid' (InDiD CPDLoss)")
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--out-dir", type=str, default=None)
     p.add_argument("--resume", type=str, default=None, help="Run dir to resume from (finds its latest phase1 checkpoint)")
@@ -120,6 +122,7 @@ def main():
         args.n_envs = prev_args["n_envs"]
         args.horizon = prev_args["horizon"]
         args.config_file = prev_args["config_file"]
+        args.detector_loss = prev_args.get("detector_loss", "paper")
         latest_ckpt, last_done_iter = find_latest_checkpoint(out_dir)
         start_iter = last_done_iter + 1
         print(f"Resuming from {latest_ckpt} (continuing at iteration {start_iter})")
@@ -172,7 +175,7 @@ def main():
     print(f"Phase 1 done in {time.time() - start:.1f}s")
 
     # --- Phase 2 ---
-    p2_config = Phase2Config()
+    p2_config = Phase2Config(detector_loss=args.detector_loss)
     trainer2 = Phase2Trainer(trainer1, p2_config)
 
     phase2_log_path = out_dir / "phase2_log.csv"
