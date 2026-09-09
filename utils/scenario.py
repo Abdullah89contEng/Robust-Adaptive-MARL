@@ -180,7 +180,10 @@ class Scenario(BaseScenario):
 		for agent, ag in zip(self.world.agents[:agent_count], self.map.agents):
 			agent.set_pos(pos=ag.position.to(self.world.device) - offset, batch_index=batch_index)
 			agent.set_vel(vel=zero_pos, batch_index=batch_index)
-			agent.set_rot(rot=zero_rot, batch_index=batch_index)
+			# same agent, fresh heading each reset when the layout is randomized
+			agent_rot = ((torch.rand(1, device=self.world.device) * (2.0 * math.pi) - math.pi)
+			             if self.randomize_map else zero_rot)
+			agent.set_rot(rot=agent_rot, batch_index=batch_index)
 			agent.set_ang_vel(ang_vel=zero_rot, batch_index=batch_index)
 
 		for survival, sur in zip(self._survivals, self.map.survivals):
