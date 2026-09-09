@@ -47,6 +47,8 @@ def parse_args():
                    help="Phase-2 CPD objective: 'paper' (arXiv:2510.24988v1 BCE) or 'indid' (InDiD CPDLoss)")
     p.add_argument("--randomize-map", action="store_true",
                    help="re-randomize obstacle/victim/agent positions each iteration (boundary fixed)")
+    p.add_argument("--device", type=str, default="cpu",
+                   help="torch device for models AND the vectorized sim: cpu | cuda | cuda:N")
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--out-dir", type=str, default=None)
     p.add_argument("--resume", type=str, default=None, help="Run dir to resume from (finds its latest phase1 checkpoint)")
@@ -118,6 +120,10 @@ def main():
     args = parse_args()
     torch.manual_seed(args.seed)
     random.seed(args.seed)
+    if args.device.startswith("cuda") and not torch.cuda.is_available():
+        raise SystemExit("--device %s requested but torch.cuda.is_available() is False; "
+                         "install a CUDA build of torch on a machine with an NVIDIA GPU" % args.device)
+    dev = torch.device(args.device)
 
     start_iter = 0
     if args.resume:
@@ -143,6 +149,7 @@ def main():
         scenario_factory=lambda: Scenario(config_file=args.config_file, shaping_weight=args.shaping_weight,
                                           randomize_map=args.randomize_map),
         config=p1_config,
+        device=dev,
     )
     print(f"n_agents={trainer1.n_agents} obs_dim={trainer1.obs_dim} code_dim={trainer1.code_dim}")
 

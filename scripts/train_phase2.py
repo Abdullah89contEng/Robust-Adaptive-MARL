@@ -62,6 +62,8 @@ def parse_args():
                    help="Phase-2 CPD objective: 'paper' (arXiv:2510.24988v1 BCE) or 'indid' (InDiD CPDLoss)")
     p.add_argument("--randomize-map", action="store_true",
                    help="re-randomize obstacle/victim/agent positions each episode (boundary fixed)")
+    p.add_argument("--device", type=str, default="cpu",
+                   help="torch device for models AND the vectorized sim: cpu | cuda | cuda:N")
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--out-dir", type=str, default=None)
     return p.parse_args()
@@ -87,6 +89,10 @@ def main():
     args = parse_args()
     torch.manual_seed(args.seed)
     random.seed(args.seed)
+    if args.device.startswith("cuda") and not torch.cuda.is_available():
+        raise SystemExit("--device %s requested but torch.cuda.is_available() is False; "
+                         "install a CUDA build of torch on a machine with an NVIDIA GPU" % args.device)
+    dev = torch.device(args.device)
 
     ckpt_path = Path(args.phase1_ckpt).resolve()
     prev_args = json.loads((ckpt_path.parent / "args.json").read_text())
@@ -108,6 +114,7 @@ def main():
     trainer1 = Phase1Trainer(
         scenario_factory=lambda: Scenario(config_file=config_file, randomize_map=args.randomize_map),
         config=Phase1Config(n_envs=n_envs, horizon=horizon),
+        device=dev,
     )
     load_phase1(trainer1, ckpt_path)
     print(f"n_agents={trainer1.n_agents} obs_dim={trainer1.obs_dim} code_dim={trainer1.code_dim}")

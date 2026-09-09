@@ -41,6 +41,10 @@ EVAL_ROLLOUTS = _E("EV", 4)    # x8 envs = 32 change + 32 no-change traces
 EVAL_H       = 140
 CHANGE_STEP  = 40
 NORMAL, HEAVY = Regime(1.10, 0.16), Regime(1.52, 0.36)
+DEVICE       = os.environ.get("DEVICE", "cpu")   # cpu | cuda | cuda:N (models + vectorized sim)
+if DEVICE.startswith("cuda") and not torch.cuda.is_available():
+    raise SystemExit("DEVICE=%s requested but torch.cuda.is_available() is False" % DEVICE)
+_dev = torch.device(DEVICE)
 
 CKPT_KEYS = ["flow", "flow_momentum", "budget_encoder", "budget_decoder",
              "exploration_policies", "exploration_critics", "exploration_critics_target",
@@ -58,12 +62,12 @@ t0 = time.time()
 if P1_CKPT:
     print(f"phase1: SKIPPED, loading {P1_CKPT}")
     t1 = load_phase1(P1_CKPT, scenario_factory=lambda: Scenario(config_file=CFG, shaping_weight=SHAPING,
-                     randomize_map=bool(RANDMAP)), config=Phase1Config(n_envs=8, horizon=HORIZON))
+                     randomize_map=bool(RANDMAP)), config=Phase1Config(n_envs=8, horizon=HORIZON), device=_dev)
     log = []
 else:
   p1cfg = Phase1Config(n_envs=8, horizon=HORIZON)
   t1 = Phase1Trainer(lambda: Scenario(config_file=CFG, shaping_weight=SHAPING,
-                                      randomize_map=bool(RANDMAP)), p1cfg)
+                                      randomize_map=bool(RANDMAP)), p1cfg, device=_dev)
   print(f"phase1: n_agents={t1.n_agents} obs_dim={t1.obs_dim}  {P1_ITERS} iters, horizon {HORIZON}")
   def _save_p1(path):
       st = {k: getattr(t1, k).state_dict() for k in CKPT_KEYS}
@@ -284,7 +288,7 @@ fig.tight_layout(); fig.savefig(out / "fig5_rescue_episode.png", dpi=120); plt.c
 
 summary = dict(minutes=round((time.time()-t0)/60, 1), p1_iters=P1_ITERS, horizon=HORIZON,
                p1_return_end=(float(np.nanmean(L["episode_return_agent0"][-100:])) if log else "loaded"),
-               cpd_loss=CPD_LOSS, randomize_map=bool(RANDMAP), bce_w=BCE_W, len_segment=LEN_SEGMENT,
+               device=DEVICE, cpd_loss=CPD_LOSS, randomize_map=bool(RANDMAP), bce_w=BCE_W, len_segment=LEN_SEGMENT,
                p2_epochs=P2_EPOCHS, best_thr=best["thr"], f1=round(best["f1"],3),
                tpr=round(best["tpr"],3), fpr=round(best["fpr"],3), mean_delay=round(best["delay"],1),
                rescued=f"{resc}/5")
