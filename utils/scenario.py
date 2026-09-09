@@ -32,6 +32,8 @@ class Scenario(BaseScenario):
 		agent_u_multiplier: float = 4.0,
 		agent_max_speed: float = 1.5,
 		randomize_map: bool = False,
+		collision_penalty: float = 0.0,
+		collision_margin: float = 0.0,
 	):
 		super().__init__()
 		self.map = map_ if map_ is not None else make_map_from_file(config_file)
@@ -77,6 +79,12 @@ class Scenario(BaseScenario):
 		self.drag = drag
 		self.agent_u_multiplier = agent_u_multiplier
 		self.agent_max_speed = agent_max_speed
+		# Per-agent, per-step reward penalty:  -collision_penalty * (number
+		# of entities whose surface gap with the agent is < collision_margin),
+		# counting collidable obstacles (boundary walls included) and other
+		# agents. 0 disables it. Victims are collide=False so never count.
+		self.collision_penalty = collision_penalty
+		self.collision_margin = collision_margin
 		# When True, every full env.reset() re-randomizes the interior
 		# layout (obstacles + victims + agents) within the same fixed
 		# boundary, instead of only respawning the agents.
@@ -305,6 +313,21 @@ class Scenario(BaseScenario):
 			if self._prev_phi is not None and self._prev_phi.shape == phi.shape:
 				self._shared_reward = self._shared_reward + (self.shaping_gamma * phi - self._prev_phi)
 			self._prev_phi = phi.detach()
+
+		if self.collision_penalty > 0.0 and self.world.agents:
+			agents = self.world.agents
+			n_ag = len(agents)
+			obstacles = [lm for lm in self.world.landmarks
+			             if getattr(lm, "collide", False) and not isinstance(lm, Survival)]
+			hits = torch.zeros(self.world.batch_dim, n_ag, device=self.world.device)
+			for i in range(n_ag):
+				for obs in obstacles:
+					hits[:, i] += (self.world.get_distance(agents[i], obs) < self.collision_margin).float()
+				for j in range(i + 1, n_ag):
+					pair = (self.world.get_distance(agents[i], agents[j]) < self.collision_margin).float()
+					hits[:, i] += pair
+					hits[:, j] += pair
+			self._agent_rescue_bonus = self._agent_rescue_bonus - self.collision_penalty * hits
 
 	def reward(self, agent: Agent):
 		agent_index = self.world.agents.index(agent)

@@ -44,6 +44,8 @@ def parse_args():
     p.add_argument("--config-file", type=str, default="world_config.yaml")
     p.add_argument("--shaping-weight", type=float, default=0.0,
                    help="potential-based reward shaping toward nearest unrescued victim (0 = off)")
+    p.add_argument("--collision-penalty", type=float, default=0.0,
+                   help="per-agent per-step penalty for overlapping an obstacle or another agent (0 = off)")
     p.add_argument("--detector-loss", type=str, default="paper", choices=["paper", "indid"],
                    help="Phase-2 CPD objective: 'paper' (arXiv:2510.24988v1 BCE) or 'indid' (InDiD CPDLoss)")
     p.add_argument("--randomize-map", action="store_true",
@@ -132,6 +134,7 @@ def main():
         args.config_file = prev_args["config_file"]
         args.detector_loss = prev_args.get("detector_loss", "paper")
         args.randomize_map = prev_args.get("randomize_map", False)
+        args.collision_penalty = prev_args.get("collision_penalty", 0.0)
         latest_ckpt, last_done_iter = find_latest_checkpoint(out_dir)
         start_iter = last_done_iter + 1
         print(f"Resuming from {latest_ckpt} (continuing at iteration {start_iter})")
@@ -145,7 +148,8 @@ def main():
     p1_config = Phase1Config(n_envs=args.n_envs, horizon=args.horizon)
     trainer1 = Phase1Trainer(
         scenario_factory=lambda: Scenario(config_file=args.config_file, shaping_weight=args.shaping_weight,
-                                          randomize_map=args.randomize_map),
+                                          randomize_map=args.randomize_map,
+                                          collision_penalty=args.collision_penalty),
         config=p1_config,
         device=dev,
     )

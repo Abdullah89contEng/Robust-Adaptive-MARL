@@ -115,7 +115,8 @@ def main():
     print(f"Writing outputs to {out_dir}")
 
     trainer1 = Phase1Trainer(
-        scenario_factory=lambda: Scenario(config_file=config_file, randomize_map=args.randomize_map),
+        scenario_factory=lambda: Scenario(config_file=config_file, randomize_map=args.randomize_map,
+                                          collision_penalty=prev_args.get("collision_penalty", 0.0)),
         config=Phase1Config(n_envs=n_envs, horizon=horizon),
         device=dev,
     )

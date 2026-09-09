@@ -31,6 +31,7 @@ HORIZON=${HORIZON:-96}
 P1_ITERS=${P1_ITERS:-9000}
 P2_ITERS=${P2_ITERS:-400}
 SHAPING=${SHAPING:-0.3}
+COLLISION=${COLLISION:-0.5}            # per-agent per-step overlap penalty (0 = off)
 DETECTOR_LOSS=${DETECTOR_LOSS:-paper}  # paper (arXiv:2510.24988v1) | indid
 RANDMAP=${RANDMAP:-1}                  # 1 = --randomize-map; 0 = off
                                        # (the per-env reshuffle is O(N_ENVS)
@@ -74,6 +75,7 @@ export PYTHONUNBUFFERED=1              # live console.log
 ARGS=(
   --config-file "$CONFIG"
   --shaping-weight "$SHAPING"
+  --collision-penalty "$COLLISION"
   --device "$DEVICE"
   --n-envs "$N_ENVS"
   --horizon "$HORIZON"
