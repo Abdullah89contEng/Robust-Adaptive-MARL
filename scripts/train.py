@@ -150,6 +150,12 @@ def main():
         device=dev,
     )
     print(f"n_agents={trainer1.n_agents} obs_dim={trainer1.obs_dim} code_dim={trainer1.code_dim}")
+    _pdev = next(trainer1.flow.parameters()).device
+    if _pdev.type == "cuda":
+        print(f"[device] TRAINING ON GPU: {torch.cuda.get_device_name(_pdev)} "
+              f"({torch.cuda.memory_allocated(_pdev)/1e6:.0f} MB allocated)")
+    else:
+        print(f"[device] training on CPU (models on {_pdev})")
 
     if args.resume:
         load_checkpoint(trainer1, latest_ckpt)
