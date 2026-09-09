@@ -17,6 +17,7 @@ from __future__ import annotations
 import argparse
 import csv
 import json
+import random
 import time
 from pathlib import Path
 
@@ -59,6 +60,8 @@ def parse_args():
     p.add_argument("--log-every", type=int, default=20)
     p.add_argument("--detector-loss", type=str, default="paper", choices=["paper", "indid"],
                    help="Phase-2 CPD objective: 'paper' (arXiv:2510.24988v1 BCE) or 'indid' (InDiD CPDLoss)")
+    p.add_argument("--randomize-map", action="store_true",
+                   help="re-randomize obstacle/victim/agent positions each episode (boundary fixed)")
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--out-dir", type=str, default=None)
     return p.parse_args()
@@ -83,6 +86,7 @@ def load_phase1(trainer: Phase1Trainer, ckpt_path: Path) -> None:
 def main():
     args = parse_args()
     torch.manual_seed(args.seed)
+    random.seed(args.seed)
 
     ckpt_path = Path(args.phase1_ckpt).resolve()
     prev_args = json.loads((ckpt_path.parent / "args.json").read_text())
@@ -102,7 +106,7 @@ def main():
     print(f"Writing outputs to {out_dir}")
 
     trainer1 = Phase1Trainer(
-        scenario_factory=lambda: Scenario(config_file=config_file),
+        scenario_factory=lambda: Scenario(config_file=config_file, randomize_map=args.randomize_map),
         config=Phase1Config(n_envs=n_envs, horizon=horizon),
     )
     load_phase1(trainer1, ckpt_path)

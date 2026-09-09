@@ -369,6 +369,46 @@ class Map:
             self._release_entity(agent)
             agent.position = self.get_free_cell(agent)
 
+    def reshuffle_positions(self, max_tries: int = 20) -> None:
+        """Re-place every NON-boundary obstacle, agent and victim at a fresh
+        random collision-free cell (box obstacles also get a random angle).
+        The outer boundary, every entity's shape/size/name, and the entity
+        counts are unchanged -- a new interior layout inside the same arena.
+        On repeated failure to find a legal layout, restore the positions
+        read from the config file."""
+        if not hasattr(self, "_orig_layout"):
+            self._orig_layout = (
+                [(o, o.position.clone(), o.angle) for o in self.obstacles if not o.is_boundary],
+                [(a, a.position.clone()) for a in self.agents],
+                [(v, v.position.clone()) for v in self.survivals],
+            )
+        movable_obstacles = [o for o in self.obstacles if not o.is_boundary]
+        for _ in range(max_tries):
+            self._configure_cells(self.cell_size)
+            try:
+                for o in movable_obstacles:
+                    if isinstance(o.shape, Box):
+                        o.angle = random.uniform(-math.pi, math.pi)
+                    o.position = self.get_free_cell(o)
+                for a in self.agents:
+                    a.position = self.get_free_cell(a)
+                for v in self.survivals:
+                    v.position = self.get_free_cell(v)
+                return
+            except RuntimeError:
+                continue
+        # could not lay out a legal random map -- fall back to the config
+        obs_l, ag_l, vic_l = self._orig_layout
+        self._configure_cells(self.cell_size)
+        for o, pos, ang in obs_l:
+            o.position, o.angle = pos.clone(), ang
+            r, c = self._cell_index_from_position(pos)
+            self._mark_cell_occupied(r, c, o)
+        for e, pos in [*ag_l, *vic_l]:
+            e.position = pos.clone()
+            r, c = self._cell_index_from_position(pos)
+            self._mark_cell_occupied(r, c, e)
+
     def get_free_cell(self, entity: object = None) -> Tensor:
         if self.cells_bitmap.numel() == 0:
             raise RuntimeError("cells_bitmap is empty")

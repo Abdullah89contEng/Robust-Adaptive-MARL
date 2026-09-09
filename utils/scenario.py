@@ -31,6 +31,7 @@ class Scenario(BaseScenario):
 		drag: float = 0.02,
 		agent_u_multiplier: float = 4.0,
 		agent_max_speed: float = 1.5,
+		randomize_map: bool = False,
 	):
 		super().__init__()
 		self.map = map_ if map_ is not None else make_map_from_file(config_file)
@@ -76,6 +77,10 @@ class Scenario(BaseScenario):
 		self.drag = drag
 		self.agent_u_multiplier = agent_u_multiplier
 		self.agent_max_speed = agent_max_speed
+		# When True, every full env.reset() re-randomizes the interior
+		# layout (obstacles + victims + agents) within the same fixed
+		# boundary, instead of only respawning the agents.
+		self.randomize_map = randomize_map
 		self._survivals: list[Survival] = []
 
 	def make_world(self, batch_dim: int, device: torch.device, **kwargs) -> World:
@@ -170,7 +175,10 @@ class Scenario(BaseScenario):
 
 		# Preserve the map's reset behaviour while keeping VMAS entities intact.
 		if env_index is None:
-			self.map.reset_agents()
+			if self.randomize_map:
+				self.map.reshuffle_positions()
+			else:
+				self.map.reset_agents()
 
 		for landmark, obs in zip(self.world.landmarks[:obstacle_count], self.map.obstacles):
 			landmark.set_pos(pos=obs.position.to(self.world.device) - offset, batch_index=env_index)

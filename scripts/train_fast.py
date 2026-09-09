@@ -26,6 +26,7 @@ from method.training.regime import Regime, apply_regime
 from method.viz import _victim_state
 
 CFG          = "world_config_5v.yaml"
+RANDMAP      = _E("RANDMAP", 1)   # 1 = new obstacle/victim/agent layout each iteration (boundary fixed)
 HORIZON      = _E("FH", 48)
 P1_ITERS     = _E("P1", 850)
 P1_CKPT      = os.environ.get("P1CKPT", "")   # if set, skip Phase-1 training
@@ -56,12 +57,13 @@ t0 = time.time()
 # =====================================================================
 if P1_CKPT:
     print(f"phase1: SKIPPED, loading {P1_CKPT}")
-    t1 = load_phase1(P1_CKPT, scenario_factory=lambda: Scenario(config_file=CFG, shaping_weight=SHAPING),
-                     config=Phase1Config(n_envs=8, horizon=HORIZON))
+    t1 = load_phase1(P1_CKPT, scenario_factory=lambda: Scenario(config_file=CFG, shaping_weight=SHAPING,
+                     randomize_map=bool(RANDMAP)), config=Phase1Config(n_envs=8, horizon=HORIZON))
     log = []
 else:
   p1cfg = Phase1Config(n_envs=8, horizon=HORIZON)
-  t1 = Phase1Trainer(lambda: Scenario(config_file=CFG, shaping_weight=SHAPING), p1cfg)
+  t1 = Phase1Trainer(lambda: Scenario(config_file=CFG, shaping_weight=SHAPING,
+                                      randomize_map=bool(RANDMAP)), p1cfg)
   print(f"phase1: n_agents={t1.n_agents} obs_dim={t1.obs_dim}  {P1_ITERS} iters, horizon {HORIZON}")
   def _save_p1(path):
       st = {k: getattr(t1, k).state_dict() for k in CKPT_KEYS}
@@ -176,7 +178,7 @@ print(f"[{time.time()-t0:.0f}s] phase 2 done, detector + fig2 saved")
 # EVAL  (InDiD calculate_errors: any flag >= true change = TP)
 # =====================================================================
 detector = t2.detector.eval()
-factory = lambda: Scenario(config_file=CFG)
+factory = lambda: Scenario(config_file=CFG, randomize_map=bool(RANDMAP))
 NA = t1.n_agents
 env = t1.env
 W = detector.window
@@ -282,7 +284,7 @@ fig.tight_layout(); fig.savefig(out / "fig5_rescue_episode.png", dpi=120); plt.c
 
 summary = dict(minutes=round((time.time()-t0)/60, 1), p1_iters=P1_ITERS, horizon=HORIZON,
                p1_return_end=(float(np.nanmean(L["episode_return_agent0"][-100:])) if log else "loaded"),
-               cpd_loss=CPD_LOSS, bce_w=BCE_W, len_segment=LEN_SEGMENT,
+               cpd_loss=CPD_LOSS, randomize_map=bool(RANDMAP), bce_w=BCE_W, len_segment=LEN_SEGMENT,
                p2_epochs=P2_EPOCHS, best_thr=best["thr"], f1=round(best["f1"],3),
                tpr=round(best["tpr"],3), fpr=round(best["fpr"],3), mean_delay=round(best["delay"],1),
                rescued=f"{resc}/5")

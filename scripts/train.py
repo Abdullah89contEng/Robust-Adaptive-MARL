@@ -12,6 +12,7 @@ from __future__ import annotations
 import argparse
 import csv
 import json
+import random
 import time
 from pathlib import Path
 
@@ -44,6 +45,8 @@ def parse_args():
                    help="potential-based reward shaping toward nearest unrescued victim (0 = off)")
     p.add_argument("--detector-loss", type=str, default="paper", choices=["paper", "indid"],
                    help="Phase-2 CPD objective: 'paper' (arXiv:2510.24988v1 BCE) or 'indid' (InDiD CPDLoss)")
+    p.add_argument("--randomize-map", action="store_true",
+                   help="re-randomize obstacle/victim/agent positions each iteration (boundary fixed)")
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--out-dir", type=str, default=None)
     p.add_argument("--resume", type=str, default=None, help="Run dir to resume from (finds its latest phase1 checkpoint)")
@@ -114,6 +117,7 @@ def find_latest_checkpoint(run_dir: Path) -> tuple[Path, int]:
 def main():
     args = parse_args()
     torch.manual_seed(args.seed)
+    random.seed(args.seed)
 
     start_iter = 0
     if args.resume:
@@ -123,6 +127,7 @@ def main():
         args.horizon = prev_args["horizon"]
         args.config_file = prev_args["config_file"]
         args.detector_loss = prev_args.get("detector_loss", "paper")
+        args.randomize_map = prev_args.get("randomize_map", False)
         latest_ckpt, last_done_iter = find_latest_checkpoint(out_dir)
         start_iter = last_done_iter + 1
         print(f"Resuming from {latest_ckpt} (continuing at iteration {start_iter})")
@@ -135,7 +140,8 @@ def main():
 
     p1_config = Phase1Config(n_envs=args.n_envs, horizon=args.horizon)
     trainer1 = Phase1Trainer(
-        scenario_factory=lambda: Scenario(config_file=args.config_file, shaping_weight=args.shaping_weight),
+        scenario_factory=lambda: Scenario(config_file=args.config_file, shaping_weight=args.shaping_weight,
+                                          randomize_map=args.randomize_map),
         config=p1_config,
     )
     print(f"n_agents={trainer1.n_agents} obs_dim={trainer1.obs_dim} code_dim={trainer1.code_dim}")
