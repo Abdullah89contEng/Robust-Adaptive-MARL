@@ -27,7 +27,7 @@ import torch
 
 import random
 
-from ..detector.indid import CausalLocalWindowTransformer, detection_loss
+from ..detector.indid import CausalLocalWindowTransformer, detection_loss, paper_cpd_loss
 from .phase1 import Phase1Trainer
 from .regime import DEFAULT_MODES, apply_regime, sample_episode_schedule, sample_far_regime
 
@@ -38,23 +38,35 @@ class Phase2Config:
     # is the attention span AND the deployment history cap.
     d_model: int = 64
     n_heads: int = 4
-    n_layers: int = 2
+    n_layers: int = 4        # arXiv:2510.24988v1 Sec. 4: "4-layer multi-head attention network (4 heads)"
     dim_feedforward: int = 128
-    window: int = 48
+    window: int = 20         # arXiv:2510.24988v1 Sec. 4: "trajectory windows of length 20"
     # "raw" -> detector runs on the transition (o, a, r, o'), where the
     # change is strongly visible (probe AUC ~0.8-0.9); "code" -> frozen
     # f_phi embedding c_{i,t}.
     detector_input: str = "raw"
-    # InDiD CPDLoss (third-party/InDiD/utils/loss.py): segment length T
-    # (paper: 5..32), delay weighted alpha = 2*batch/T, FA at beta = 1;
-    # Adam lr 1e-3, no gradient clipping.
+
+    # Training objective:
+    #   "paper" -> arXiv:2510.24988v1 Eq. 7 (+ Alg. 1/2): near-boundary
+    #              weighted, label-smoothed BCE on +/-Delta boundary labels
+    #              (default).
+    #   "indid" -> InDiD CPDLoss (delay + false-alarm), kept for comparison.
+    detector_loss: str = "paper"
+    label_half_width: int = 2        # +/-Delta window: y_t = 1 for |t - theta| <= this
+    label_smooth_eps: float = 0.1    # y~_t = (1 - eps) y_t + eps/2                 (Alg. 1)
+    near_boundary_alpha: float = 3.0  # w_t = 1 + alpha for t in the +/-Delta window (Alg. 2)
+    input_noise_std: float = 0.01    # additive Gaussian token noise, Sec. 5.2 ...
+    input_noise_prob: float = 0.30   # ... applied to the batch with this probability
+    weight_decay: float = 1e-4       # Adam weight decay, Sec. 5.2
+
+    # InDiD-path only (detector_loss == "indid"): CPDLoss segment length T
+    # (paper: 5..32), delay weighted alpha = 2*batch/T, FA at beta = 1.
     len_segment: int = 32
-    # Reproduce the reference's batch of ~64 sequences: stack this many
-    # rollouts and merge the (env, agent) axes before one loss/step
-    # (4 x 8 envs x 2 agents = 64).
+    # Reproduce a batch of ~64 sequences: stack this many rollouts and merge
+    # the (env, agent) axes before one loss/step (4 x 8 envs x 2 agents = 64).
     rollouts_per_step: int = 4
     p_no_change: float = 0.35   # fraction of episodes with NO regime switch (stationary negatives)
-    grad_clip_norm: float = 0.0  # 0 = off, matching InDiD's grad_clip: 0.0
+    grad_clip_norm: float = 1.0  # arXiv:2510.24988v1 Sec. 5.2: "gradient clipping 1.0" (0 = off)
     lr: float = 1e-3
 
 
@@ -87,7 +99,9 @@ class Phase2Trainer:
             window=config.window,
             dim_feedforward=config.dim_feedforward,
         ).to(self.device)
-        self.optimizer = torch.optim.Adam(self.detector.parameters(), lr=config.lr)
+        self.optimizer = torch.optim.Adam(
+            self.detector.parameters(), lr=config.lr, weight_decay=config.weight_decay
+        )
 
     @torch.no_grad()
     def collect_labeled_episode(self) -> tuple[torch.Tensor, torch.Tensor]:
@@ -181,17 +195,30 @@ class Phase2Trainer:
             sws.append(st.unsqueeze(0).expand(ne, na).reshape(ne * na))
         feat_batch = torch.cat(feats, 0)                 # (B, T, D)
         sw_batch = torch.cat(sws, 0)                     # (B,)
-        self.detector.update_norm(feat_batch)            # online analogue of InDiD's offline z-norm
+        self.detector.update_norm(feat_batch)            # online analogue of the paper's offline z-norm
+
+        # arXiv:2510.24988v1 Sec. 5.2: additive Gaussian token noise on a
+        # fraction of batches.
+        if self.cfg.input_noise_std > 0 and random.random() < self.cfg.input_noise_prob:
+            feat_batch = feat_batch + self.cfg.input_noise_std * torch.randn_like(feat_batch)
 
         p = self.detector(feat_batch)                    # (B, T)
-        total_loss = detection_loss(p, sw_batch, self.cfg.len_segment)
+        if self.cfg.detector_loss == "paper":
+            total_loss = paper_cpd_loss(
+                p, sw_batch,
+                half_width=self.cfg.label_half_width,
+                smooth_eps=self.cfg.label_smooth_eps,
+                near_alpha=self.cfg.near_boundary_alpha,
+            )
+        else:
+            total_loss = detection_loss(p, sw_batch, self.cfg.len_segment)
 
         self.optimizer.zero_grad()
         total_loss.backward()
-        # InDiD trains with grad_clip: 0.0 (none). We keep an OPTIONAL norm
-        # clip (off by default) plus a skip-on-non-finite guard, because our
-        # rollout data is noisier than InDiD's clean synthetic sequences and
-        # a single bad batch can otherwise poison Adam's moments permanently.
+        # arXiv:2510.24988v1 clips grad norm at 1.0 (Phase2Config default);
+        # set grad_clip_norm = 0 to disable. The skip-on-non-finite guard
+        # below is ours: one bad batch can otherwise poison Adam's moments
+        # permanently on this noisier rollout data.
         if self.cfg.grad_clip_norm > 0:
             grad_norm = torch.nn.utils.clip_grad_norm_(self.detector.parameters(), self.cfg.grad_clip_norm)
         else:

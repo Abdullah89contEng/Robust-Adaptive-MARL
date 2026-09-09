@@ -202,3 +202,60 @@ def calculate_errors(real: torch.Tensor, pred: torch.Tensor, seq_len: int):
 def f1_score(TN: int, FP: int, FN: int, TP: int) -> float:
     denom = 2 * TP + FN + FP
     return 2.0 * TP / denom if denom else float("nan")
+
+# =========================================================================
+# Paper CPD loss  --  arXiv:2510.24988v1 "Enhancing Hierarchical RL through
+# Change Point Detection in Time Series", Eq. 7 + Algorithm 1/2.
+#
+# The paper trains its sigmoid boundary classifier with a plain per-step
+# BINARY CROSS-ENTROPY (Eq. 7) on labels that are 1 in a +/-Delta window
+# around the change and 0 elsewhere ("pseudo-labels ... smoothed in +/-Delta
+# window"), with
+#   - label smoothing            y~_t = (1 - eps) y_t + eps/2       (Alg. 1)
+#   - near-boundary up-weighting  w_t  = 1 + alpha * 1[t in N]       (Alg. 2)
+# There is NO delay / false-alarm decomposition (that is InDiD, above); this
+# is the objective used when Phase2Config.detector_loss == "paper".  Our
+# setting supplies GROUND-TRUTH switch times, so y_t is the true boundary
+# indicator rather than a pseudo-label from intrinsic-signal peaks.
+# =========================================================================
+def boundary_labels_from_switch_time(
+    switch_time: torch.Tensor, seq_len: int, half_width: int = 2
+) -> torch.Tensor:
+    """(batch,) 1-indexed vartheta_tilde (>= seq_len == "no switch") ->
+    (batch, seq_len) float labels: 1.0 for |t - theta| <= half_width,
+    0.0 elsewhere; all-zero for a no-change sequence.
+
+    theta (0-indexed) == switch_time - 1: `collect_labeled_episode` applies
+    mu_2 just before the env.step whose transition is stored at position
+    switch_time - 1, so that transition is the first one under the new
+    regime (same convention as `labels_from_switch_time`)."""
+    device = switch_time.device
+    st = switch_time.to(device).long()
+    t_idx = torch.arange(seq_len, device=device).unsqueeze(0)     # (1, T), 0-indexed
+    theta0 = (st - 1).unsqueeze(1)                                # (B, 1)
+    changed = (st < seq_len).unsqueeze(1)                         # (B, 1)
+    near = (t_idx - theta0).abs() <= half_width
+    return (near & changed).float()
+
+
+def paper_cpd_loss(
+    p: torch.Tensor,
+    switch_time: torch.Tensor,
+    half_width: int = 2,
+    smooth_eps: float = 0.1,
+    near_alpha: float = 3.0,
+) -> torch.Tensor:
+    """arXiv:2510.24988v1 Eq. 7 (+ Alg. 1/2): near-boundary-weighted,
+    label-smoothed BCE.  `p`, `switch_time`: (batch, seq_len), (batch,).
+
+        y~_t = (1 - eps) * y_t + eps/2
+        w_t  = 1 + near_alpha * y_t         (y_t == 1 exactly on t in N)
+        L    = sum_t w_t * BCE(p_t, y~_t) / sum_t w_t
+    """
+    seq_len = p.shape[1]
+    y = boundary_labels_from_switch_time(switch_time, seq_len, half_width)  # (B, T) in {0,1}
+    y_smooth = (1.0 - smooth_eps) * y + smooth_eps / 2.0
+    p = p.clamp(1e-4, 1.0 - 1e-4)
+    bce = -(y_smooth * torch.log(p) + (1.0 - y_smooth) * torch.log(1.0 - p))
+    w = 1.0 + near_alpha * y
+    return (w * bce).sum() / w.sum()

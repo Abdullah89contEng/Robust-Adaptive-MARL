@@ -1,7 +1,9 @@
-"""Fast full run: Phase 1 (short) + Phase 2 (InDiD, dataset + minibatch),
+"""Fast full run: Phase 1 (short) + Phase 2 (dataset + minibatch),
 target wall-clock < 30 min. Writes checkpoints and result figures to
-runs/fast_<ts>/.  InDiD Phase 2 = causal local-window Transformer + CPDLoss
-+ calculate_errors metrics (third-party/InDiD)."""
+runs/fast_<ts>/.  Phase 2 detector = causal local-window Transformer;
+objective defaults to the paper CPD loss (arXiv:2510.24988v1 Eq. 7:
+near-boundary-weighted, label-smoothed BCE); CPDLOSS=indid switches to
+InDiD CPDLoss.  Metrics: calculate_errors (third-party/InDiD)."""
 from __future__ import annotations
 import sys, time
 from pathlib import Path
@@ -17,6 +19,7 @@ from method.io import load_phase1
 from method.training.phase1 import Phase1Trainer, Phase1Config
 from method.training.phase2 import Phase2Trainer, Phase2Config
 from method.detector.indid import (detection_loss, labels_from_switch_time,
+                                   paper_cpd_loss, boundary_labels_from_switch_time,
                                    find_first_change, calculate_errors, f1_score)
 from method.training.meta_test import MetaTestRunner, MetaTestConfig, RegimeChangeEvent
 from method.training.regime import Regime, apply_regime
@@ -31,7 +34,8 @@ DS_EPISODES  = _E("DS", 90)    # Phase-2 labeled-episode dataset
 P2_EPOCHS    = _E("EP", 90)
 P2_BATCH     = 64
 LEN_SEGMENT  = _E("T", 32)
-BCE_W        = _E("BCEW", 1.0)  # 0 = pure InDiD CPDLoss; >0 = InDiD "combined" (BCE + InDiD)
+CPD_LOSS     = os.environ.get("CPDLOSS", "paper")  # "paper" (arXiv:2510.24988v1) or "indid"
+BCE_W        = _E("BCEW", 0.0)  # indid path only: >0 = InDiD "combined" (BCE + InDiD)
 EVAL_ROLLOUTS = _E("EV", 4)    # x8 envs = 32 change + 32 no-change traces
 EVAL_H       = 140
 CHANGE_STEP  = 40
@@ -59,6 +63,13 @@ else:
   p1cfg = Phase1Config(n_envs=8, horizon=HORIZON)
   t1 = Phase1Trainer(lambda: Scenario(config_file=CFG, shaping_weight=SHAPING), p1cfg)
   print(f"phase1: n_agents={t1.n_agents} obs_dim={t1.obs_dim}  {P1_ITERS} iters, horizon {HORIZON}")
+  def _save_p1(path):
+      st = {k: getattr(t1, k).state_dict() for k in CKPT_KEYS}
+      st["log_alpha_exp"] = t1.log_alpha_exp.detach().clone()
+      st["log_alpha_exe"] = t1.log_alpha_exe.detach().clone()
+      torch.save(st, path)
+
+  CKPT_EVERY = int(os.environ.get("CKPT_EVERY", 2000))
   log = []
   for it in range(P1_ITERS):
     r = t1.rollout_iteration()
@@ -68,11 +79,10 @@ else:
     if it % 100 == 0 or it == P1_ITERS - 1:
         last = log[-1] if log else {}
         print(f"  [{time.time()-t0:5.0f}s] it {it:4d}  ret {r['episode_return_agent0']:+.2f}  "
-              f"l_elbo {last.get('l_elbo', float('nan')):.1f}  l_cpc {last.get('l_cpc', float('nan')):.2f}")
-  state = {k: getattr(t1, k).state_dict() for k in CKPT_KEYS}
-  state["log_alpha_exp"] = t1.log_alpha_exp.detach().clone()
-  state["log_alpha_exe"] = t1.log_alpha_exe.detach().clone()
-  torch.save(state, out / "phase1_checkpoint.pt")
+              f"l_elbo {last.get('l_elbo', float('nan')):.1f}  l_cpc {last.get('l_cpc', float('nan')):.2f}", flush=True)
+    if it > 0 and it % CKPT_EVERY == 0:
+        _save_p1(out / f"phase1_checkpoint_{it}.pt")
+  _save_p1(out / "phase1_checkpoint.pt")
 
 def sm(a, k=31):
     a = np.asarray(a, float)
@@ -98,7 +108,8 @@ print(f"[{time.time()-t0:.0f}s] phase 1 ready ({'loaded' if P1_CKPT else 'traine
 # =====================================================================
 # PHASE 2  (InDiD: dataset + shuffled-minibatch CPDLoss training)
 # =====================================================================
-p2cfg = Phase2Config(len_segment=LEN_SEGMENT, window=min(Phase2Config.window, HORIZON))
+p2cfg = Phase2Config(len_segment=LEN_SEGMENT, window=min(Phase2Config.window, HORIZON),
+                     detector_loss=CPD_LOSS)
 t2 = Phase2Trainer(t1, p2cfg)
 print(f"phase2: detector={type(t2.detector).__name__}  input dim {t2.detector.input_proj.in_features}  "
       f"window {t2.detector.window}  building dataset ({DS_EPISODES} episodes)...")
@@ -119,13 +130,24 @@ for ep in range(P2_EPOCHS):
     losses = []
     for b in range(0, len(X), P2_BATCH):
         idx = perm[b:b+P2_BATCH]
-        p = t2.detector(X[idx])
-        loss = detection_loss(p, SW[idx], LEN_SEGMENT)
-        if BCE_W > 0:   # InDiD "combined": BCE + InDiD
-            lbl = labels_from_switch_time(SW[idx].long(), p.shape[1]).float()
-            loss = loss + BCE_W * torch.nn.functional.binary_cross_entropy(p.clamp(1e-4, 1 - 1e-4), lbl)
+        xb = X[idx]
+        if CPD_LOSS == "paper":
+            if np.random.rand() < p2cfg.input_noise_prob:          # Sec. 5.2 token noise
+                xb = xb + p2cfg.input_noise_std * torch.randn_like(xb)
+            p = t2.detector(xb)
+            loss = paper_cpd_loss(p, SW[idx], half_width=p2cfg.label_half_width,
+                                  smooth_eps=p2cfg.label_smooth_eps,
+                                  near_alpha=p2cfg.near_boundary_alpha)
+            gclip = p2cfg.grad_clip_norm
+        else:
+            p = t2.detector(xb)
+            loss = detection_loss(p, SW[idx], LEN_SEGMENT)
+            if BCE_W > 0:   # InDiD "combined": BCE + InDiD
+                lbl = labels_from_switch_time(SW[idx].long(), p.shape[1]).float()
+                loss = loss + BCE_W * torch.nn.functional.binary_cross_entropy(p.clamp(1e-4, 1 - 1e-4), lbl)
+            gclip = float("inf")
         opt.zero_grad(); loss.backward()
-        gn = torch.nn.utils.clip_grad_norm_(t2.detector.parameters(), float("inf"))
+        gn = torch.nn.utils.clip_grad_norm_(t2.detector.parameters(), gclip)
         if torch.isfinite(gn) and torch.isfinite(loss):
             opt.step(); losses.append(loss.item())
     ep_loss.append(np.mean(losses) if losses else np.nan)
@@ -134,11 +156,19 @@ for ep in range(P2_EPOCHS):
             pp = t2.detector(X[:256])
             m = (SW[:256] < X.shape[1])
             pre = float(pp[m][:, :5].mean()) if m.any() else float("nan")
-        print(f"  [{time.time()-t0:5.0f}s] epoch {ep:3d}  CPDLoss {ep_loss[-1]:8.3f}  p@start {pre:.3f}")
+            if m.any():
+                yb = boundary_labels_from_switch_time(SW[:256][m].long(), X.shape[1], p2cfg.label_half_width)
+                at_b = float((pp[m] * yb).sum() / yb.sum().clamp(min=1))
+            else:
+                at_b = float("nan")
+        print(f"  [{time.time()-t0:5.0f}s] epoch {ep:3d}  loss {ep_loss[-1]:8.3f}  "
+              f"p@start {pre:.3f}  p@boundary {at_b:.3f}")
 torch.save(t2.detector.state_dict(), out / "phase2_detector.pt")
 
 fig, ax = plt.subplots(figsize=(9, 4))
-ax.plot(ep_loss); ax.set_title("Phase 2: InDiD CPDLoss per epoch"); ax.set_xlabel("epoch"); ax.set_ylabel("CPDLoss")
+ax.plot(ep_loss)
+ax.set_title(f"Phase 2: {'paper CPD (arXiv:2510.24988v1)' if CPD_LOSS == 'paper' else 'InDiD CPDLoss'} per epoch")
+ax.set_xlabel("epoch"); ax.set_ylabel("loss")
 fig.tight_layout(); fig.savefig(out / "fig2_phase2_loss.png", dpi=120); plt.close(fig)
 print(f"[{time.time()-t0:.0f}s] phase 2 done, detector + fig2 saved")
 
@@ -207,7 +237,7 @@ ax[0].axvline(best["thr"], color="k", ls="--", lw=1); ax[0].set_xlabel("threshol
 ax[1].plot([r["thr"] for r in rows], [r["delay"] for r in rows], "d-", color="C3")
 ax[1].axvline(best["thr"], color="k", ls="--", lw=1); ax[1].set_xlabel("threshold"); ax[1].set_ylabel("mean detection delay (steps)")
 ax[1].set_title("Detection delay vs threshold (delayed detection still counts)")
-fig.suptitle(f"InDiD detection — NORMAL->HEAVY @ t={CHANGE_STEP}"); fig.tight_layout()
+fig.suptitle(f"Detection — NORMAL->HEAVY @ t={CHANGE_STEP}"); fig.tight_layout()
 fig.savefig(out / "fig3_detection_metrics.png", dpi=120); plt.close(fig)
 
 thr = best["thr"]
@@ -252,7 +282,7 @@ fig.tight_layout(); fig.savefig(out / "fig5_rescue_episode.png", dpi=120); plt.c
 
 summary = dict(minutes=round((time.time()-t0)/60, 1), p1_iters=P1_ITERS, horizon=HORIZON,
                p1_return_end=(float(np.nanmean(L["episode_return_agent0"][-100:])) if log else "loaded"),
-               bce_w=BCE_W, len_segment=LEN_SEGMENT,
+               cpd_loss=CPD_LOSS, bce_w=BCE_W, len_segment=LEN_SEGMENT,
                p2_epochs=P2_EPOCHS, best_thr=best["thr"], f1=round(best["f1"],3),
                tpr=round(best["tpr"],3), fpr=round(best["fpr"],3), mean_delay=round(best["delay"],1),
                rescued=f"{resc}/5")

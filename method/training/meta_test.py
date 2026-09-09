@@ -36,7 +36,7 @@ from .regime import Regime, apply_regime
 
 @dataclass
 class MetaTestConfig:
-    threshold_C: float = 0.5
+    threshold_C: float = 0.6   # arXiv:2510.24988v1 Sec. 5.2: b_hat_t = 1[p_t >= gamma], gamma = 0.6
     trigger_persistence: int = 3   # require p >= threshold_C this many steps in a row before a reset fires
     re_exploration_budget_K: int = 8
     sigma2_min: float = 0.05
