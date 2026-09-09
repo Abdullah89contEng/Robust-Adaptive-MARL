@@ -121,12 +121,17 @@ class Phase1Config:
     alpha_exp_init: float = 0.2
     log_alpha_exp_min: float = -3.0   # floor on log alpha_exp (exp(-3) ~ 0.05); stops entropy collapse
     alpha_exe_init: float = 0.2
+    log_alpha_exe_min: float = -3.0   # same floor for the (now auto-tuned) execution temperature
     eps_pos: float = 0.2
     beta_pos: float = 0.05
     pgd_steps: int = 1
     eps_self_action: float = 0.1
     beta_self_action: float = 0.05
-    lambda_cpc: float = 1.0
+    # lambda_cpc was 1.0: with the ELBO term at O(100-1000) the (correctly
+    # signed) contrastive CE at O(3) was <1% of the loss, so z never became
+    # regime-discriminative. Raised so the two terms are comparable once the
+    # ELBO has settled.
+    lambda_cpc: float = 10.0
     lambda_cov: float = 1e-3
     p_sw: float = 0.05
     # span the DEFAULT_MODES mixture (icy..heavy); also used to normalize
@@ -181,7 +186,11 @@ class Phase1Trainer:
         self.flow_momentum.load_state_dict(self.flow.state_dict())
         for p in self.flow_momentum.parameters():
             p.requires_grad_(False)
-        self.cpc_w = nn.Parameter(torch.eye(self.code_dim, device=self.device) * 0.1)
+        # Identity init (was 0.1*I): with L2-normalized z the bilinear score
+        # z^T W z' is a cosine-like quantity in ~[-1, 1]; a 0.1 scale would
+        # keep logits near 0 and the InfoNCE softmax stuck at uniform (CE
+        # pinned at the log(K+1) chance floor) regardless of separability.
+        self.cpc_w = nn.Parameter(torch.eye(self.code_dim, device=self.device))
 
         self.budget_encoder = BudgetEncoder(cond_dim, self.rho_dim).to(self.device)
         self.budget_decoder = BudgetDecoder(self.rho_dim).to(self.device)
@@ -438,7 +447,13 @@ class Phase1Trainer:
         # z-rho leakage, and every agent's mu_z shares the same mu_rho here).
         l_cov = cross_covariance_penalty(batch["mu_new"][:, 0].detach(), mu_rho)
 
-        loss = elbo_total - cfg.lambda_cpc * cpc_loss + l_rho + cfg.lambda_cov * l_cov
+        # eq:pm-enc:  L_enc = L_ELBO - lambda_CPC * log softmax(f(z_q, z_pos))
+        #                   = L_ELBO + lambda_CPC * CE(...)      [ CE = -log softmax ]
+        # `infonce_cpc_loss` returns the cross-entropy (>= 0, to be MINIMIZED),
+        # so it is ADDED. The previous `-` maximized the InfoNCE loss, i.e.
+        # trained z to make same-/different-regime segments *indistinguishable*
+        # -- l_cpc never dropped below the log(K+1) random-chance floor.
+        loss = elbo_total + cfg.lambda_cpc * cpc_loss + l_rho + cfg.lambda_cov * l_cov
         self.rep_optimizer.zero_grad()
         loss.backward()
         self.rep_optimizer.step()
@@ -619,21 +634,36 @@ class Phase1Trainer:
         self.exe_critic_optimizer.step()
 
         policy_loss_total = torch.tensor(0.0, device=self.device)
+        log_probs_pi = []
         for i in range(self.n_agents):
             new_action, log_prob, _ = self.execution_policies[i].sample(torch.cat([obs[:, i], belief[:, i]], dim=-1))
             candidate_actions = action.clone()
             candidate_actions[:, i] = new_action
             q_tot_pi = self._q_tot(self.execution_critics, self.mixer, obs, candidate_actions, belief, state)
             policy_loss_total = policy_loss_total + (alpha_exe.detach() * log_prob - q_tot_pi).mean()
+            log_probs_pi.append(log_prob)
 
         self.exe_policy_optimizer.zero_grad()
         policy_loss_total.backward()
         self.exe_policy_optimizer.step()
 
+        # Auto-tune the execution entropy temperature against the same
+        # target entropy as exploration (ch-proposed.tex: alpha_exe is
+        # adapted, independently of alpha_exp). Previously log_alpha_exe was
+        # a Parameter with a live optimizer that was never stepped -- alpha_exe
+        # stayed pinned at its init 0.2 for the whole run.
+        log_prob_all = torch.stack(log_probs_pi, dim=0).mean()
+        alpha_exe_loss = -(self.log_alpha_exe.exp() * (log_prob_all.detach() + self.target_entropy))
+        self.alpha_exe_optimizer.zero_grad()
+        alpha_exe_loss.backward()
+        self.alpha_exe_optimizer.step()
+        with torch.no_grad():
+            self.log_alpha_exe.clamp_(min=self.cfg.log_alpha_exe_min)
+
         return {
             "exe_critic_loss": critic_loss.item(),
             "exe_policy_loss": policy_loss_total.item(),
-            "alpha_exe": alpha_exe.item(),
+            "alpha_exe": self.log_alpha_exe.exp().item(),
         }
 
     def _polyak_update(self) -> None:

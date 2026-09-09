@@ -72,9 +72,20 @@ class ExchangeablePosterior:
         return PosteriorState(mu=mu, sigma2=sigma2, count=count)
 
     def _beta(self, new_count: torch.Tensor) -> torch.Tensor:
-        """beta_(t-1) = kappa / (nu + kappa * (t - 2)), t = new_count (>= 1)."""
+        """Exact conjugate/Kalman gain for absorbing the t-th code, with the
+        prior sigma2_0 = kappa:
+
+            g_t = sigma2_(t-1) / (sigma2_(t-1) + (nu - kappa))
+                = kappa / (nu + kappa * (t - 1))          (closed form)
+
+        `new_count` is t (state.count starts at 0, step() passes count + 1).
+        The previous version used (t - 2), i.e. g at t-1 -- an off-by-one
+        that over-weighted every new code (g_1 = kappa/(nu-kappa) = 0.25
+        instead of the correct kappa/nu = 0.20 for nu=1, kappa=0.2) and made
+        sigma2 decay a little too fast at every step.
+        """
         t = new_count.to(torch.get_default_dtype())
-        return self.kappa / (self.nu + self.kappa * (t - 2.0))
+        return self.kappa / (self.nu + self.kappa * (t - 1.0))
 
     def step(self, state: PosteriorState, code: torch.Tensor) -> PosteriorState:
         """Absorb one new code `c_i,(t-1)` for every batch entry, unconditionally.

@@ -65,18 +65,31 @@ def elbo_loss(
     return reconstruction + kl
 
 
-def infonce_cpc_loss(z_query: torch.Tensor, z_positive: torch.Tensor, z_negatives: torch.Tensor, w: torch.Tensor) -> torch.Tensor:
-    """L_CPC (InfoNCE), spec §3: f(z, z') = z^T W z', W learnable.
+def infonce_cpc_loss(
+    z_query: torch.Tensor, z_positive: torch.Tensor, z_negatives: torch.Tensor,
+    w: torch.Tensor, temperature: float = 0.1,
+) -> torch.Tensor:
+    """L_CPC (InfoNCE), spec eq:pm-enc: f(z, z') = z^T W z', W learnable.
 
     z_query:     (B, d)      online embedding of a same-regime segment
     z_positive:  (B, d)      momentum embedding of a *different* same-regime segment
     z_negatives: (B, K, d)   momentum embeddings of other-regime segments
     w:           (d, d)      learnable bilinear form
 
-    Returns the per-example cross-entropy loss (mean not yet taken over the batch).
+    The embeddings are L2-normalized before the bilinear score (standard
+    CPC/SimCLR practice, not in the spec's one-line `z^T W z'`): without it
+    the encoder minimizes the loss partly by inflating ||z||, which sends
+    the score -> +/- inf and made l_cpc blow up to ~200 mid-run. With unit
+    z the score is a bounded quadratic form and `temperature` sets the
+    logit scale so `lambda_cpc` is meaningful.
+
+    Returns the per-example cross-entropy loss (mean not yet taken).
     """
-    pos_score = torch.einsum("bd,de,be->b", z_query, w, z_positive)
-    neg_scores = torch.einsum("bd,de,bke->bk", z_query, w, z_negatives)
-    logits = torch.cat([pos_score.unsqueeze(-1), neg_scores], dim=-1)  # (B, 1 + K)
-    labels = torch.zeros(z_query.shape[0], dtype=torch.long, device=z_query.device)
+    zq = torch.nn.functional.normalize(z_query, dim=-1)
+    zp = torch.nn.functional.normalize(z_positive, dim=-1)
+    zn = torch.nn.functional.normalize(z_negatives, dim=-1)
+    pos_score = torch.einsum("bd,de,be->b", zq, w, zp)
+    neg_scores = torch.einsum("bd,de,bke->bk", zq, w, zn)
+    logits = torch.cat([pos_score.unsqueeze(-1), neg_scores], dim=-1) / temperature
+    labels = torch.zeros(zq.shape[0], dtype=torch.long, device=zq.device)
     return torch.nn.functional.cross_entropy(logits, labels, reduction="none")
