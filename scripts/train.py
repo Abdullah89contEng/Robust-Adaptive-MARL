@@ -30,6 +30,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from utils.scenario import Scenario
 from method.training.phase1 import Phase1Trainer, Phase1Config
 from method.training.phase2 import Phase2Trainer, Phase2Config
+from method.io import resolve_device
 
 
 def parse_args():
@@ -120,13 +121,7 @@ def main():
     args = parse_args()
     torch.manual_seed(args.seed)
     random.seed(args.seed)
-    if args.device.startswith("cuda") and not torch.cuda.is_available():
-        raise SystemExit("--device %s requested but torch.cuda.is_available() is False; "
-                         "install a CUDA build of torch on a machine with an NVIDIA GPU" % args.device)
-    if args.device == "auto":
-        args.device = "cuda" if torch.cuda.is_available() else "cpu"
-    dev = torch.device(args.device)
-    print("device:", dev)
+    dev = resolve_device(args.device)
 
     start_iter = 0
     if args.resume:

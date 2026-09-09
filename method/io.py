@@ -34,6 +34,53 @@ from method.training.phase1 import Phase1Trainer, Phase1Config
 from method.training.phase2 import Phase2Config
 from method.detector.indid import CausalLocalWindowTransformer
 
+
+def _cuda_usable() -> tuple[bool, str]:
+    """(ok, reason). ok is False if cuda is missing OR the GPU's compute
+    capability is below every arch this torch build shipped kernels for."""
+    if not torch.cuda.is_available():
+        return False, "torch.cuda.is_available() is False (CPU-only torch, or no driver)"
+    try:
+        name = torch.cuda.get_device_name(0)
+        major, minor = torch.cuda.get_device_capability(0)
+        built = sorted({int(a[3:]) for a in torch.cuda.get_arch_list() if a.startswith("sm_")})
+    except Exception as exc:  # can't introspect -- let the caller try
+        return True, f"(capability check skipped: {exc})"
+    dev_sm = major * 10 + minor
+    if built and dev_sm < built[0]:
+        return False, (
+            f"GPU '{name}' is compute capability sm_{dev_sm}, but this torch build only "
+            f"has kernels for sm_{'/sm_'.join(map(str, built))} -- the GPU is too old for "
+            f"this PyTorch. Use --device cpu, run on a newer GPU (sm_{built[0]}+), or "
+            f"install a torch build that supports sm_{dev_sm}."
+        )
+    return True, ""
+
+
+def resolve_device(spec: str = "auto") -> torch.device:
+    """--device / DEVICE string -> torch.device.
+
+    "auto" : cuda if usable (present AND this torch has kernels for it), else
+             cpu (says why it fell back). "cuda"/"cuda:N": that device, but a
+             clear SystemExit if cuda is missing or the GPU is unusable.
+    "cpu"  : passed straight through, no cuda calls.
+    """
+    spec = (spec or "auto").strip()
+    if spec == "auto":
+        ok, why = _cuda_usable()
+        dev = torch.device("cuda" if ok else "cpu")
+        if not ok and torch.cuda.is_available():
+            print(f"[device] auto: GPU present but unusable ({why}); using cpu")
+        print(f"[device] {dev}")
+        return dev
+    if spec.startswith("cuda"):
+        ok, why = _cuda_usable()
+        if not ok:
+            raise SystemExit(f"--device {spec}: {why}")
+    dev = torch.device(spec)
+    print(f"[device] {dev}")
+    return dev
+
 # Modules a Phase 1 checkpoint carries -- must match scripts/train.py.
 PHASE1_MODULE_KEYS = (
     "flow", "flow_momentum", "budget_encoder", "budget_decoder",
