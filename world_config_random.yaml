@@ -1,0 +1,99 @@
+world:
+  height: 20.0
+  width: 20.0
+  wall_thickness: 0.01
+  have_boundary: true
+agents:
+- name: agent_0
+  radius: 1.5598136790149004
+  position:
+  - 12.4975004196167
+  - 6.503499984741211
+- name: agent_1
+  radius: 1.3161966995215935
+  position:
+  - 17.49250030517578
+  - 4.505499839782715
+- name: agent_2
+  radius: 1.477009776552717
+  position:
+  - 7.502500057220459
+  - 16.493499755859375
+obstacles:
+- name: obstacle_box_0
+  shape: box
+  position:
+  - 16.493499755859375
+  - 8.501500129699707
+  rotation: -0.4990634762961359
+  width: 4.844421851525048
+  length: 1.7579544029403025
+- name: obstacle_box_1
+  shape: box
+  position:
+  - 11.498499870300293
+  - 15.494500160217285
+  rotation: 2.0725269178006984
+  width: 4.485927696562813
+  length: 1.9182343317851318
+- name: obstacle_box_2
+  shape: box
+  position:
+  - 4.505499839782715
+  - 9.500499725341797
+  rotation: 0.02944838360869584
+  width: 4.5833820394550315
+  length: 1.9081128851953353
+- name: obstacle_box_3
+  shape: box
+  position:
+  - 16.493499755859375
+  - 16.493499755859375
+  rotation: -1.5676148901859928
+  width: 4.755804204157224
+  length: 1.6183689966753316
+- name: obstacle_box_4
+  shape: box
+  position:
+  - 11.498499870300293
+  - 10.499500274658203
+  rotation: 1.444075463791438
+  width: 4.902165950439583
+  length: 1.3101475693193327
+victims:
+- name: victim_0
+  weight: 6.55698970053863
+  radius: 0.2
+  position:
+  - 0.5095000267028809
+  - 17.49250030517578
+- name: victim_1
+  weight: 7.331796608810253
+  radius: 0.2
+  position:
+  - 0.5095000267028809
+  - 12.4975004196167
+- name: victim_2
+  weight: 20.297427120353625
+  radius: 0.2
+  position:
+  - 7.502500057220459
+  - 10.499500274658203
+- name: victim_3
+  weight: 23.25696440883062
+  radius: 0.2
+  position:
+  - 6.503499984741211
+  - 2.507499933242798
+- name: victim_4
+  weight: 27.925474227873746
+  radius: 0.2
+  position:
+  - 7.502500057220459
+  - 7.502500057220459
+- name: victim_5
+  weight: 25.083626353655056
+  radius: 0.2
+  position:
+  - 16.493499755859375
+  - 3.506500005722046
