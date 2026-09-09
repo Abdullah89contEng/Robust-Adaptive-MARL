@@ -24,13 +24,13 @@ cd "${SLURM_SUBMIT_DIR:-$(cd "$(dirname "$(readlink -f "$0")")/.." && pwd)}"
 
 # ---- config -------------------------------------------------------------
 CONDA_ENV=${CONDA_ENV:-r-marl}          # conda env name
-CONFIG=${CONFIG:-world_config_5v.yaml}  # map yaml
+CONFIG=${CONFIG:-world_config_random.yaml}  # map yaml
 DEVICE=${DEVICE:-auto}                  # auto | cpu | cuda | cuda:N
                                         #   auto -> cuda if usable, else cpu
-N_ENVS=${N_ENVS:-8}                     # raise to 256-512 on a real GPU
-HORIZON=${HORIZON:-96}
-P1_ITERS=${P1_ITERS:-9000}
-P2_ITERS=${P2_ITERS:-400}
+N_ENVS=${N_ENVS:-700}                     # raise to 256-512 on a real GPU
+HORIZON=${HORIZON:-500}
+P1_ITERS=${P1_ITERS:-20000}
+P2_ITERS=${P2_ITERS:-1000}
 SHAPING=${SHAPING:-0.3}
 DETECTOR_LOSS=${DETECTOR_LOSS:-paper}   # paper (arXiv:2510.24988v1) | indid
 SEED=${SEED:-0}
