@@ -36,23 +36,26 @@ from method.detector.indid import CausalLocalWindowTransformer
 
 
 def _cuda_usable() -> tuple[bool, str]:
-    """(ok, reason). ok is False if cuda is missing OR the GPU's compute
-    capability is below every arch this torch build shipped kernels for."""
+    """(ok, reason). Probe the GPU with a real matmul + device sync so an
+    unsupported-arch GPU (e.g. sm_52 on a torch built for sm_75+) is caught
+    HERE and we fall back to CPU, instead of `[device] cuda` followed by a
+    'no kernel image is available' crash deep in the model."""
     if not torch.cuda.is_available():
         return False, "torch.cuda.is_available() is False (CPU-only torch, or no driver)"
     try:
-        name = torch.cuda.get_device_name(0)
-        major, minor = torch.cuda.get_device_capability(0)
-        built = sorted({int(a[3:]) for a in torch.cuda.get_arch_list() if a.startswith("sm_")})
-    except Exception as exc:  # can't introspect -- let the caller try
-        return True, f"(capability check skipped: {exc})"
-    dev_sm = major * 10 + minor
-    if built and dev_sm < built[0]:
+        a = torch.randn(64, 64, device="cuda")
+        float((a @ a).sum().item())   # real compute kernel + forced sync
+    except Exception as exc:
+        name = ""
+        try:
+            name = " '%s'" % torch.cuda.get_device_name(0)
+        except Exception:
+            pass
+        first = str(exc).splitlines()[0] if str(exc) else type(exc).__name__
         return False, (
-            f"GPU '{name}' is compute capability sm_{dev_sm}, but this torch build only "
-            f"has kernels for sm_{'/sm_'.join(map(str, built))} -- the GPU is too old for "
-            f"this PyTorch. Use --device cpu, run on a newer GPU (sm_{built[0]}+), or "
-            f"install a torch build that supports sm_{dev_sm}."
+            "a CUDA test op failed on GPU%s (%s). This GPU is very likely "
+            "unsupported by the installed torch (too old / wrong CUDA build). "
+            "Use --device cpu, or run on a newer GPU." % (name, first)
         )
     return True, ""
 
