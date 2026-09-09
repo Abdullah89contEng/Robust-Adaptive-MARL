@@ -56,6 +56,9 @@ CHECKPOINT_KEYS = [
 def parse_args():
     p = argparse.ArgumentParser()
     p.add_argument("--phase1-ckpt", type=str, required=True)
+    p.add_argument("--config-file", type=str, default=None,
+                   help="override the map yaml recorded in the Phase-1 run's args.json "
+                        "(default: reuse it, so the detector sees the same episode distribution)")
     p.add_argument("--phase2-iters", type=int, default=300)
     p.add_argument("--log-every", type=int, default=20)
     p.add_argument("--detector-loss", type=str, default="paper", choices=["paper", "indid"],
@@ -101,7 +104,9 @@ def main():
     prev_args = json.loads((ckpt_path.parent / "args.json").read_text())
     n_envs = prev_args["n_envs"]
     horizon = prev_args["horizon"]
-    config_file = prev_args["config_file"]
+    config_file = args.config_file or prev_args["config_file"]
+    if args.config_file and args.config_file != prev_args.get("config_file"):
+        print(f"  NOTE: map overridden: {prev_args.get('config_file')!r} -> {config_file!r}")
     print(f"Phase 1 checkpoint: {ckpt_path}")
     print(f"  n_envs={n_envs} horizon={horizon} config_file={config_file}")
 

@@ -25,7 +25,7 @@ from method.training.meta_test import MetaTestRunner, MetaTestConfig, RegimeChan
 from method.training.regime import Regime, apply_regime
 from method.viz import _victim_state
 
-CFG          = "world_config_5v.yaml"
+CFG          = os.environ.get("CFG", "world_config_5v.yaml")  # map config (yaml) to train on
 RANDMAP      = _E("RANDMAP", 1)   # 1 = new obstacle/victim/agent layout each iteration (boundary fixed)
 HORIZON      = _E("FH", 48)
 P1_ITERS     = _E("P1", 850)
@@ -289,7 +289,7 @@ ax[2].plot(np.cumsum(RW), color="C2"); ax[2].axvline(CHANGE_STEP, color="C3", lw
 ax[2].set_ylabel("cumulative return"); ax[2].set_xlabel("step")
 fig.tight_layout(); fig.savefig(out / "fig5_rescue_episode.png", dpi=120); plt.close(fig)
 
-summary = dict(minutes=round((time.time()-t0)/60, 1), p1_iters=P1_ITERS, horizon=HORIZON,
+summary = dict(minutes=round((time.time()-t0)/60, 1), config_file=CFG, p1_iters=P1_ITERS, horizon=HORIZON,
                p1_return_end=(float(np.nanmean(L["episode_return_agent0"][-100:])) if log else "loaded"),
                device=DEVICE, cpd_loss=CPD_LOSS, randomize_map=bool(RANDMAP), bce_w=BCE_W, len_segment=LEN_SEGMENT,
                p2_epochs=P2_EPOCHS, best_thr=best["thr"], f1=round(best["f1"],3),
