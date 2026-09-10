@@ -22,14 +22,14 @@ set -euo pipefail
 cd "${SLURM_SUBMIT_DIR:-$(cd "$(dirname "$(readlink -f "$0")")/.." && pwd)}"
 
 # ---- config ----------------------------------------------------------
-CONDA_ENV=${CONDA_ENV:-r-marl}
-CONFIG=${CONFIG:-world_config_5v.yaml}
+CONDA_ENV=${CONDA_ENV:-marl}
+CONFIG=${CONFIG:-world_config_random.yaml}
 DEVICE=${DEVICE:-auto}                 # auto | cpu | cuda | cuda:N
-N_ENVS=${N_ENVS:-16}                   # the only real parallelism knob on CPU;
+N_ENVS=${N_ENVS:-10}                   # the only real parallelism knob on CPU;
                                        # 256-1024 on a real GPU
-HORIZON=${HORIZON:-96}
-P1_ITERS=${P1_ITERS:-9000}
-P2_ITERS=${P2_ITERS:-400}
+HORIZON=${HORIZON:-350}
+P1_ITERS=${P1_ITERS:-20000}
+P2_ITERS=${P2_ITERS:-1000}
 SHAPING=${SHAPING:-0.3}
 COLLISION=${COLLISION:-0.5}            # per-agent per-step overlap penalty (0 = off)
 DETECTOR_LOSS=${DETECTOR_LOSS:-paper}  # paper (arXiv:2510.24988v1) | indid
