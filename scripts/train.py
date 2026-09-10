@@ -228,8 +228,11 @@ def main():
     phase2_df = pd.read_csv(phase2_log_path) if phase2_log_path.exists() else None
 
     fig, axes = plt.subplots(2, 3, figsize=(15, 8))
-    axes[0, 0].plot(phase1_df["iter"], phase1_df["episode_return_agent0"])
-    axes[0, 0].set_title("phase1: rollout return")
+    for col in [c for c in phase1_df.columns if c.startswith("episode_return_agent")]:
+        axes[0, 0].plot(phase1_df["iter"], phase1_df[col], lw=0.7, alpha=0.6, label=col.replace("episode_return_", ""))
+    if "episode_return_team" in phase1_df:
+        axes[0, 0].plot(phase1_df["iter"], phase1_df["episode_return_team"], lw=1.8, color="k", label="team")
+    axes[0, 0].set_title("phase1: rollout return"); axes[0, 0].legend(fontsize=7)
     updated = phase1_df.dropna(subset=["l_elbo"])
     axes[0, 1].plot(updated["iter"], updated["l_elbo"])
     axes[0, 1].set_title("phase1: l_elbo")

@@ -256,7 +256,8 @@ class Phase1Trainer:
         obs = self.env.reset()
 
         posterior_state = self.posterior.init_state((n_envs, n_agents), device=self.device)
-        episode_return = 0.0
+        # per-agent episode return, each step averaged over the n_envs
+        episode_return_per_agent = torch.zeros(n_agents)
         t = 0
         for t in range(1, cfg.horizon + 1):
             regime_half = torch.zeros(n_agents, dtype=torch.long)
@@ -325,11 +326,21 @@ class Phase1Trainer:
             self.d_exe.add(**row)
 
             obs = next_obs
-            episode_return += rewards[0].mean().item()
+            episode_return_per_agent += joint_reward.mean(dim=0).detach().cpu()
             if bool(dones.all()):
                 break
 
-        return {"episode_return_agent0": episode_return, "steps": t}
+        logs = {f"episode_return_agent{i}": episode_return_per_agent[i].item()
+                for i in range(n_agents)}
+        logs["episode_return_team"] = episode_return_per_agent.sum().item()
+        logs["episode_return_mean"] = episode_return_per_agent.mean().item()
+        logs["steps"] = t
+        survivals = getattr(self.env.scenario, "_survivals", None)
+        if survivals:
+            rescued = torch.stack([sv.rescued for sv in survivals], dim=1).float()  # (n_envs, n_surv)
+            logs["rescued_frac"] = rescued.mean().item()
+            logs["rescued_count"] = rescued.sum(dim=1).mean().item()
+        return logs
 
     # ------------------------------------------------------------------
     # Updates

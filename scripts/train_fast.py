@@ -101,8 +101,9 @@ def sm(a, k=31):
 if log:
     L = {k: np.array([d.get(k, np.nan) for d in log]) for k in log[0]}
     fig, ax = plt.subplots(2, 2, figsize=(12, 7))
-    ax[0,0].plot(L["it"], L["episode_return_agent0"], lw=.4, alpha=.4); ax[0,0].plot(L["it"], sm(L["episode_return_agent0"]), lw=2)
-    ax[0,0].set_title("Phase 1: rollout return"); ax[0,0].axhline(0, color="k", lw=.5)
+    ax[0,0].plot(L["it"], L["episode_return_agent0"], lw=.4, alpha=.4); ax[0,0].plot(L["it"], sm(L["episode_return_agent0"]), lw=2, label="agent0")
+    if "episode_return_team" in L: ax[0,0].plot(L["it"], sm(L["episode_return_team"]), lw=2, color="k", label="team")
+    ax[0,0].set_title("Phase 1: rollout return"); ax[0,0].axhline(0, color="k", lw=.5); ax[0,0].legend(fontsize=7)
     ax[0,1].plot(L["it"], sm(L["l_elbo"])); ax[0,1].set_title("Phase 1: L_elbo"); ax[0,1].set_yscale("log")
     ax[1,0].plot(L["it"], sm(L["l_cpc"])); ax[1,0].set_title("Phase 1: L_cpc"); ax[1,0].set_yscale("log")
     ax[1,1].plot(L["it"], sm(L["exp_critic_loss"]), label="exploration"); ax[1,1].plot(L["it"], sm(L["exe_critic_loss"]), label="execution")
