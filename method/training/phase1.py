@@ -132,6 +132,15 @@ class Phase1Config:
     # regime-discriminative. Raised so the two terms are comparable once the
     # ELBO has settled.
     lambda_cpc: float = 10.0
+    # KL(posterior || prior) inside elbo_loss pulls every regime's code
+    # toward the SAME shared prior_mu (=0), which directly fights lambda_cpc
+    # (it wants regimes far apart). CCM (third-party/baselines-ccm) faces
+    # the identical PEARL-style KL term and keeps it near-zero relative to
+    # its contrastive coefficient (kl_lambda=0.0001 vs ce_coeff=1.0,
+    # ccm_launch_experiment.py:217-218; the KL branch isn't even wired into
+    # the optimizer call in rlkit/torch/sac/sac.py:164-165). Mirrored here
+    # at the same ratio against lambda_cpc: 10.0 * (0.0001/1.0) = 1e-3.
+    kl_weight: float = 1e-3
     lambda_cov: float = 1e-3
     p_sw: float = 0.05
     # span the DEFAULT_MODES mixture (icy..heavy); also used to normalize
@@ -429,6 +438,7 @@ class Phase1Trainer:
                 posterior_sigma2=batch["sigma2_new"][:, i],
                 prior_mu=torch.zeros_like(code),
                 prior_sigma2=torch.full_like(batch["sigma2_new"][:, i], cfg.nu),
+                kl_weight=cfg.kl_weight,
             ).mean()
             elbo_total = elbo_total + elbo
 

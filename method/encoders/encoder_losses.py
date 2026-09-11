@@ -1,4 +1,4 @@
-"""Encoder training losses (method-spec.md §3): L_enc = L_ELBO - lambda_CPC * L_CPC.
+"""Encoder training losses (method-spec.md §3): L_enc = L_ELBO + lambda_CPC * L_CPC.
 
 L_ELBO's reconstruction term uses the flow's own change-of-variables
 density rather than a separate decoder network: since f_phi is invertible,
@@ -33,8 +33,9 @@ def elbo_loss(
     posterior_sigma2: torch.Tensor,
     prior_mu: torch.Tensor,
     prior_sigma2: torch.Tensor,
+    kl_weight: float = 1.0,
 ) -> torch.Tensor:
-    """L_ELBO = -E_q[log p_psi(y|z,x)] + KL(q(z|tau) || p(z)).
+    """L_ELBO = -E_q[log p_psi(y|z,x)] + kl_weight * KL(q(z|tau) || p(z)).
 
     The reconstruction term scores `code` under the *predictive* (pre-
     update) posterior — (mu_i,(t-1), sigma2_i,(t-1)) — not the posterior
@@ -49,6 +50,23 @@ def elbo_loss(
     against the prior, which is the standard `q(z|tau)` reading (posterior
     given the whole history so far).
 
+    `kl_weight` mirrors CCM's own treatment of this term: CCM (the
+    contrastive-context baseline this encoder is compared against,
+    `third-party/baselines-ccm`) is PEARL's information-bottleneck KL
+    term with its coefficient taken down to near zero (CLI default
+    `kl_lambda=0.0001` against `ce_coeff=1.0`,
+    `ccm_launch_experiment.py:217-218`) and, in the vendored reference
+    code, the KL branch is never even wired into the optimizer call
+    (`kl_lambda`/`ce_coeff` are commented out of the `PEARLSoftActorCritic`
+    constructor call, `rlkit/torch/sac/sac.py:22-29,164-165`) — i.e. CCM's
+    context encoder is trained almost entirely by the contrastive loss,
+    with the prior-regularizing KL term left negligible rather than at
+    full (PEARL-style) strength. A full-strength KL here pulls every
+    regime's posterior mean toward the same shared `prior_mu`, which
+    directly fights `lambda_cpc`'s need for inter-regime separation
+    (method-spec.md §3); `kl_weight` lets the caller down-weight it the
+    same way CCM does instead of removing the term outright.
+
     Both terms are evaluated in closed form (both q and p are diagonal
     Gaussians, and the reconstruction term uses the flow's exact change-
     of-variables density — see module docstring). Returns a scalar per
@@ -62,7 +80,7 @@ def elbo_loss(
         code_dim * (posterior_sigma2 / prior_sigma2 - 1 - torch.log(posterior_sigma2 / prior_sigma2))
         + ((posterior_mu - prior_mu) ** 2).sum(dim=-1) / prior_sigma2
     )
-    return reconstruction + kl
+    return reconstruction + kl_weight * kl
 
 
 def infonce_cpc_loss(
