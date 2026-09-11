@@ -23,7 +23,7 @@ cd "${SLURM_SUBMIT_DIR:-$(cd "$(dirname "$(readlink -f "$0")")/.." && pwd)}"
 
 # ---- config ----------------------------------------------------------
 CONDA_ENV=${CONDA_ENV:-marl}
-CONFIG=${CONFIG:-world_config_random.yaml}
+CONFIG=${CONFIG:-map.yaml}
 DEVICE=${DEVICE:-auto}                 # auto | cpu | cuda | cuda:N
 N_ENVS=${N_ENVS:-10}                   # the only real parallelism knob on CPU;
                                        # 256-1024 on a real GPU
