@@ -1,0 +1,82 @@
+world:
+  height: 40.0
+  width: 50.0
+  wall_thickness: 0.7
+  have_boundary: true
+agents:
+- name: agent_0
+  radius: 1.2694447339182693
+  position:
+  - 25.0
+  - 6.143589973449707
+- name: agent_1
+  radius: 1.2305682100570974
+  position:
+  - 19.048978805541992
+  - 12.082051277160645
+obstacles:
+- name: obstacle_box_0
+  shape: box
+  position:
+  - 46.82040786743164
+  - 21.9794864654541
+  rotation: 1.7157649319552366
+  width: 4.333000648286355
+  length: 1.0665106255056234
+- name: obstacle_box_1
+  shape: box
+  position:
+  - 18.05714225769043
+  - 25.938461303710938
+  rotation: -0.5715910744102759
+  width: 4.985153917561635
+  length: 1.0273358739903022
+- name: obstacle_box_2
+  shape: box
+  position:
+  - 43.84489822387695
+  - 14.061538696289062
+  rotation: -2.5026279357352887
+  width: 4.338754033840537
+  length: 1.1107083980411838
+- name: obstacle_box_3
+  shape: box
+  position:
+  - 22.024490356445312
+  - 9.112820625305176
+  rotation: -1.3001620328387062
+  width: 4.844384916939196
+  length: 1.3837478024825631
+- name: obstacle_box_4
+  shape: box
+  position:
+  - 37.89387893676758
+  - 20.989744186401367
+  rotation: 0.6733767292440476
+  width: 4.621159411791994
+  length: 1.0765770075576997
+victims:
+- name: victim_0
+  weight: 29.92439964022562
+  radius: 0.4
+  position:
+  - 11.114285469055176
+  - 16.041025161743164
+- name: victim_1
+  weight: 22.180720878584385
+  radius: 0.4
+  position:
+  - 19.048978805541992
+  - 31.876922607421875
+- name: victim_2
+  weight: 29.51368358093781
+  radius: 0.4
+  position:
+  - 18.05714225769043
+  - 21.9794864654541
+- name: victim_3
+  weight: 16.754208138624787
+  radius: 0.4
+  position:
+  - 11.114285469055176
+  - 10.102563858032227
