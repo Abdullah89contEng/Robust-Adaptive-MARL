@@ -16,14 +16,16 @@ tune them on results.
 
 ## Prerequisites
 
-1. A trained Phase 1 checkpoint and a trained Phase 2 detector. Current defaults
-   (auto-picked by `method.io.load_model`): `runs/20260906_162246/phase1_checkpoint_2999.pt`
-   and `runs/20260906_182413_phase2only/phase2_detector.pt`.
-2. **Phase 1 is currently undertrained** (~3000 iters, agents do not reach the victim, return
-   is a constant floor). Detection and ε_a metrics work regardless, but the *return* /
-   *degradation* / *recovery* numbers are only meaningful once Phase 1 is trained to a policy
-   that actually rescues. Retrain with `scripts/train.py --phase1-iters <N>` on a larger
-   config before trusting those columns.
+1. A trained Phase 1 checkpoint and a trained Phase 2 detector. The checkpoints behind the
+   thesis's results chapter: `runs/uni_20260912_170324/phase1_checkpoint_5500.pt` and
+   `runs/20260913_175126_phase2only/phase2_detector.pt`. If you don't pass `--phase1-ckpt`
+   / `--detector`, `method.io.load_model` auto-picks whatever is newest under `runs/`.
+2. **That checkpoint is still undertrained** (Phase 1 stopped at 5,747 of a planned 20,000
+   iterations, Phase 2 at 121 of a planned 300 — see the thesis's results chapter for why).
+   Agents rarely reach a victim, so return sits on a passive floor. Detection and ε_a metrics
+   still run fine on it, but the *return* / *degradation* / *recovery* columns won't mean
+   anything until Phase 1 is trained further. Resume with `scripts/train.py --resume <run
+   dir> --phase1-iters <N>` before trusting those columns.
 
 ## Full run
 
@@ -60,11 +62,13 @@ trained checkpoint:
 | `detector_off` | `threshold_C = 10` (never fires) | value of the explicit reset |
 | `no_reexplore` | `re_exploration_budget_K = 0` | value of the re-exploration window vs. the reset alone |
 
-The remaining ablations from the thesis table (`plain_fmasac`, `context_only`,
+A few more variants are wired into `run_experiments.py` (`plain_fmasac`, `context_only`,
 `no_adversary`, `maal_random`, `mean_pooling`, `gru_belief`, `no_covariance`, `single_phase`,
-`fixed_epsilon`, `sample_belief`, `q_zero`) each need a **separately trained checkpoint** with
-that component removed at training time. `run_experiments.py` lists them and exits with a
-message if asked for one — training those checkpoints is the remaining work.
+`fixed_epsilon`, `sample_belief`, `q_zero`), each needing a **separately trained checkpoint**
+with that component removed at training time; the thesis itself doesn't report a
+component-wise study, so these are optional if you want to run one yourself.
+`run_experiments.py` lists them and exits with a message if asked for one you haven't
+trained.
 
 ## Conditions
 

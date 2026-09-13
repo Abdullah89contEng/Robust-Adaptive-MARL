@@ -71,10 +71,10 @@ def build_events(condition: str, change_step: int, eps_a: float, n_agents: int):
     raise SystemExit(f"unknown condition '{condition}'")
 
 
-def run_episode(trainer, detector, cfg, events, horizon, seed):
+def run_episode(trainer, detector, cfg, events, horizon, seed, config_file):
     torch.manual_seed(seed)
     runner = MetaTestRunner(trainer, detector,
-                            lambda: Scenario(config_file="world_config.yaml"), cfg)
+                            lambda: Scenario(config_file=config_file), cfg)
     runner.schedule(events)
     runner.reset_state()
     step_reward, a0_resets = [], []
@@ -101,6 +101,10 @@ def main():
     ap.add_argument("--eps-list", default="0.0,0.1,0.2,0.3")
     ap.add_argument("--variants", default="full")
     ap.add_argument("--conditions", default="nominal,attack,change,simultaneous")
+    ap.add_argument("--config-file", default=None,
+                    help="map yaml for the eval env (default: reuse whatever the Phase-1 "
+                         "checkpoint's own args.json recorded, so the arena/agent/victim "
+                         "counts match what was actually trained)")
     ap.add_argument("--out-dir", default=None)
     args = ap.parse_args()
 
@@ -109,7 +113,15 @@ def main():
     conditions = args.conditions.split(",")
     out = Path(args.out_dir) if args.out_dir else Path("runs") / ("experiments_" + time.strftime("%Y%m%d_%H%M%S"))
     out.mkdir(parents=True, exist_ok=True)
-    (out / "args.json").write_text(json.dumps(vars(args), indent=2))
+
+    config_file = args.config_file
+    if config_file is None and args.phase1_ckpt:
+        prev = json.loads((Path(args.phase1_ckpt).resolve().parent / "args.json").read_text())
+        config_file = prev.get("config_file", "world_config.yaml")
+    config_file = config_file or "world_config.yaml"
+    print(f"config_file={config_file}")
+
+    (out / "args.json").write_text(json.dumps({**vars(args), "config_file": config_file}, indent=2))
 
     trainer, detector = load_model(args.phase1_ckpt, args.detector)
     n_agents = trainer.n_agents
@@ -135,7 +147,7 @@ def main():
                     for ep in range(args.episodes):
                         s = 1000 * seed + ep
                         events, true_change = build_events(condition, args.change_step, eps_a, n_agents)
-                        r = run_episode(trainer, detector, cfg, events, args.horizon, s)
+                        r = run_episode(trainer, detector, cfg, events, args.horizon, s, config_file)
                         dm = M.detection_metrics(r["a0_resets"], true_change, r["steps"])
                         rt, cens = (M.recovery_time(r["step_reward"], true_change, r["steps"])
                                     if true_change is not None else (float("nan"), False))

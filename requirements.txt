@@ -22,7 +22,7 @@ PyYAML==6.0.3
 # --- evaluation & diagnostics ---
 scikit-learn==1.9.0
 
-# --- notebooks (main.ipynb, training_report.ipynb, deployment_test.ipynb) ---
+# --- notebooks (notebooks/*.ipynb) ---
 nbformat==5.10.4
 nbconvert==7.17.1
 ipython==9.14.1
