@@ -81,7 +81,12 @@ class Phase2Trainer:
         # are actually exercised during episode collection below, but
         # freezing is a correctness statement, not just an optimization:
         # nothing here should ever receive a gradient.
-        for module in [self.phase1.flow, *self.phase1.exploration_policies]:
+        frozen_modules = [self.phase1.flow, *self.phase1.exploration_policies]
+        if isinstance(self.phase1.posterior, torch.nn.Module):  # context_mode="vae"
+            frozen_modules.append(self.phase1.posterior)
+        if self.phase1.context_decoder is not None:
+            frozen_modules.append(self.phase1.context_decoder)
+        for module in frozen_modules:
             module.eval()
             for p in module.parameters():
                 p.requires_grad_(False)

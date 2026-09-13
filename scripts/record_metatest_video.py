@@ -31,6 +31,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from utils.scenario import Scenario
 from method.training.phase1 import Phase1Trainer, Phase1Config
 from method.detector.indid import CausalLocalWindowTransformer
+from method.io import phase1_module_keys
 from method.training.meta_test import (
     MetaTestRunner,
     MetaTestConfig,
@@ -39,23 +40,20 @@ from method.training.meta_test import (
 )
 from method.training.regime import Regime
 
-_CKPT_KEYS = [
-    "flow", "flow_momentum", "budget_encoder", "budget_decoder",
-    "exploration_policies", "exploration_critics", "exploration_critics_target",
-    "execution_policies", "execution_critics", "execution_critics_target",
-    "mixer", "mixer_target",
-]
-
 
 def build_model(phase1_ckpt: str, detector_path: str):
     ckpt = Path(phase1_ckpt).resolve()
     prev = json.loads((ckpt.parent / "args.json").read_text())
     trainer = Phase1Trainer(
         scenario_factory=lambda: Scenario(config_file="world_config.yaml"),
-        config=Phase1Config(n_envs=prev["n_envs"], horizon=prev["horizon"]),
+        config=Phase1Config(
+            n_envs=prev["n_envs"], horizon=prev["horizon"],
+            context_mode=prev.get("context_mode", "bruno"),
+            context_hidden_dim=prev.get("context_hidden_dim", 64),
+        ),
     )
     st = torch.load(ckpt, map_location=trainer.device)
-    for k in _CKPT_KEYS:
+    for k in phase1_module_keys(trainer):
         if k in st:
             getattr(trainer, k).load_state_dict(st[k])
         elif k.endswith("_target"):

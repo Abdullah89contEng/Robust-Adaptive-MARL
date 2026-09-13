@@ -84,14 +84,32 @@ def resolve_device(spec: str = "auto") -> torch.device:
     print(f"[device] {dev}")
     return dev
 
-# Modules a Phase 1 checkpoint carries -- must match scripts/train.py.
+# Modules every Phase 1 checkpoint carries regardless of context_mode --
+# must match scripts/train.py.
 PHASE1_MODULE_KEYS = (
-    "flow", "flow_momentum", "budget_encoder", "budget_decoder",
+    "flow", "budget_encoder", "budget_decoder",
     "exploration_policies", "exploration_critics", "exploration_critics_target",
     "execution_policies", "execution_critics", "execution_critics_target",
     "mixer", "mixer_target",
 )
 PHASE1_TENSOR_KEYS = ("log_alpha_exp", "log_alpha_exe")
+
+
+def phase1_module_keys(trainer: Phase1Trainer) -> tuple[str, ...]:
+    """PHASE1_MODULE_KEYS plus the context encoder/decoder, when
+    `trainer.cfg.context_mode="vae"` makes them learnable `nn.Module`s.
+    The default `context_mode="bruno"` `ExchangeablePosterior` has no
+    parameters and no `state_dict`, so `"posterior"` is never included for
+    it -- checking `isinstance(trainer.posterior, nn.Module)` rather than
+    reading `trainer.cfg.context_mode` directly keeps this correct even if
+    a future context_mode also happens not to need saving.
+    """
+    keys = list(PHASE1_MODULE_KEYS)
+    if isinstance(trainer.posterior, torch.nn.Module):
+        keys.append("posterior")
+    if getattr(trainer, "context_decoder", None) is not None:
+        keys.append("context_decoder")
+    return tuple(keys)
 
 
 # --------------------------------------------------------------------------
@@ -128,8 +146,16 @@ def _phase1_config_for(ckpt_path: Path, override: Phase1Config | None) -> tuple[
         a = json.loads(args_json.read_text())
         cfg_file = a.get("config_file", cfg_file)
         if override is None:
+            # context_mode determines which modules the checkpoint even
+            # has (posterior type, presence of context_decoder) -- unlike
+            # n_envs/horizon this MUST match the checkpoint exactly or
+            # `phase1_module_keys` picks the wrong architecture to load
+            # into. Old args.json files predate this field and default to
+            # "bruno", which is also Phase1Config's own default.
             cfg = Phase1Config(n_envs=a.get("n_envs", cfg.n_envs),
-                               horizon=a.get("horizon", cfg.horizon))
+                               horizon=a.get("horizon", cfg.horizon),
+                               context_mode=a.get("context_mode", cfg.context_mode),
+                               context_hidden_dim=a.get("context_hidden_dim", cfg.context_hidden_dim))
     return cfg, cfg_file
 
 
@@ -150,9 +176,10 @@ def load_phase1(ckpt_path: str | Path, *, scenario_factory=None,
 
     trainer = Phase1Trainer(scenario_factory, config, device=device)
     state = torch.load(ckpt_path, map_location=trainer.device)
+    module_keys = phase1_module_keys(trainer)
 
     missing = []
-    for k in PHASE1_MODULE_KEYS:
+    for k in module_keys:
         if k in state:
             getattr(trainer, k).load_state_dict(state[k])
         elif k.endswith("_target") and k[:-7] in state:
@@ -168,7 +195,7 @@ def load_phase1(ckpt_path: str | Path, *, scenario_factory=None,
         print(f"[load_phase1] not in checkpoint, used fallback: {missing}")
 
     if freeze:
-        for k in PHASE1_MODULE_KEYS:
+        for k in module_keys:
             m = getattr(trainer, k)
             m.eval()
             for p in m.parameters():

@@ -25,6 +25,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from utils.scenario import Scenario
 from method.training.phase1 import Phase1Trainer, Phase1Config
 from method.detector.indid import CausalLocalWindowTransformer
+from method.io import phase1_module_keys
 from method.training.meta_test import (
     MetaTestRunner,
     MetaTestConfig,
@@ -32,17 +33,10 @@ from method.training.meta_test import (
 )
 from method.training.regime import Regime
 
-CHECKPOINT_KEYS = [
-    "flow", "flow_momentum", "budget_encoder", "budget_decoder",
-    "exploration_policies", "exploration_critics", "exploration_critics_target",
-    "execution_policies", "execution_critics", "execution_critics_target",
-    "mixer", "mixer_target",
-]
-
 
 def load_phase1(trainer: Phase1Trainer, ckpt_path: Path) -> None:
     state = torch.load(ckpt_path, map_location=trainer.device)
-    for key in CHECKPOINT_KEYS:
+    for key in phase1_module_keys(trainer):
         if key in state:
             getattr(trainer, key).load_state_dict(state[key])
         elif key.endswith("_target"):
@@ -83,7 +77,11 @@ def main():
 
     trainer = Phase1Trainer(
         scenario_factory=lambda: Scenario(config_file=args.config_file),
-        config=Phase1Config(n_envs=prev["n_envs"], horizon=prev["horizon"]),
+        config=Phase1Config(
+            n_envs=prev["n_envs"], horizon=prev["horizon"],
+            context_mode=prev.get("context_mode", "bruno"),
+            context_hidden_dim=prev.get("context_hidden_dim", 64),
+        ),
     )
     load_phase1(trainer, ckpt)
     n_agents = trainer.n_agents

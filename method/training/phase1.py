@@ -80,6 +80,19 @@ than the posterior that already absorbed it, to avoid circularity (see
 `encoder_losses.elbo_loss`'s docstring); the KL term and `L_cov` use the
 fully-updated (post-update) posterior, matching `q(z|tau)`'s usual
 "given everything so far" reading.
+
+CONFIG CHOICE — `context_mode` selects which of `ch-proposed.tex`'s two
+admissible context-inference options `self.posterior` actually is:
+`"bruno"` (default) is the exchangeable-process posterior of
+`encoders/context_encoder.py` (Option B, exact, closed-form, but assumes a
+FIXED per-code noise band `(nu, kappa)`); `"vae"` is the learned,
+GRU-based posterior of `encoders/vae_context.py` (Option A, an amortized
+encoder + a real decoder network, which learns its own reconstruction
+noise instead of assuming one). Both expose the same
+`init_state`/`step`/`step_where`/`reset_where` interface, so
+`rollout_iteration`, `_belief_for_batch`, and every external caller
+(`MetaTestRunner`, `Phase2Trainer`) work unchanged either way; only
+`_update_representation`'s reconstruction term branches on `context_mode`.
 """
 
 from __future__ import annotations
@@ -99,8 +112,9 @@ from ..critics.mixer import QMixer
 from ..disentangle.cov_penalty import cross_covariance_penalty
 from ..encoders.budget_encoder import BudgetDecoder, BudgetEncoder, budget_loss
 from ..encoders.context_encoder import ExchangeablePosterior, information_gain_reward
-from ..encoders.encoder_losses import elbo_loss, infonce_cpc_loss
+from ..encoders.encoder_losses import elbo_loss, infonce_cpc_loss, vae_elbo_loss
 from ..encoders.flow import ConditionalFlow
+from ..encoders.vae_context import ContextDecoder, VAEContextEncoder
 from ..policies.execution_policy import ExecutionPolicy
 from ..policies.exploration_policy import ExplorationPolicy
 from .regime import apply_regime, regime_vector, sample_episode_schedule
@@ -110,14 +124,20 @@ from .regime import apply_regime, regime_vector, sample_episode_schedule
 class Phase1Config:
     n_envs: int = 8
     horizon: int = 32
+    # "bruno" (default): exact exchangeable-process posterior, Option B of
+    # ch-proposed.tex, with reconstruction noise fixed by (nu, kappa).
+    # "vae": learned GRU posterior + decoder, Option A -- see
+    # `encoders/vae_context.py` and `Phase1Trainer`'s CONFIG CHOICE note.
+    context_mode: str = "bruno"
     nu: float = 1.0
     kappa: float = 0.2
+    context_hidden_dim: int = 64   # context_mode="vae" only: GRU hidden size and decoder width
+    vae_prior_sigma2: float = 1.0  # context_mode="vae" only: N(0, vae_prior_sigma2*I) prior on z
     rho_dim: int = 4
     mixing_embed_dim: int = 32
     hidden_dim: int = 64
     gamma: float = 0.99
     tau_polyak: float = 0.01
-    tau_m: float = 0.99
     alpha_exp_init: float = 0.2
     log_alpha_exp_min: float = -3.0   # floor on log alpha_exp (exp(-3) ~ 0.05); stops entropy collapse
     alpha_exe_init: float = 0.2
@@ -188,13 +208,16 @@ class Phase1Trainer:
         self.b_dim = belief_dim(self.code_dim, self.rho_dim)
         cond_dim = self.obs_dim + self.action_dim
 
-        self.posterior = ExchangeablePosterior(code_dim=self.code_dim, nu=config.nu, kappa=config.kappa)
+        if config.context_mode == "bruno":
+            self.posterior = ExchangeablePosterior(code_dim=self.code_dim, nu=config.nu, kappa=config.kappa)
+            self.context_decoder = None
+        elif config.context_mode == "vae":
+            self.posterior = VAEContextEncoder(code_dim=self.code_dim, hidden_dim=config.context_hidden_dim).to(self.device)
+            self.context_decoder = ContextDecoder(self.code_dim, cond_dim, hidden_dim=config.context_hidden_dim).to(self.device)
+        else:
+            raise ValueError(f"context_mode must be 'bruno' or 'vae', got {config.context_mode!r}")
 
         self.flow = _make_flow(self.code_dim, cond_dim, self.device)
-        self.flow_momentum = _make_flow(self.code_dim, cond_dim, self.device)
-        self.flow_momentum.load_state_dict(self.flow.state_dict())
-        for p in self.flow_momentum.parameters():
-            p.requires_grad_(False)
         # Identity init (was 0.1*I): with L2-normalized z the bilinear score
         # z^T W z' is a cosine-like quantity in ~[-1, 1]; a 0.1 scale would
         # keep logits near 0 and the InfoNCE softmax stuck at uniform (CE
@@ -233,10 +256,14 @@ class Phase1Trainer:
         self.d_exp = ReplayBuffer(config.buffer_capacity)
         self.d_exe = ReplayBuffer(config.buffer_capacity)
 
-        self.rep_optimizer = torch.optim.Adam(
-            list(self.flow.parameters()) + [self.cpc_w] + list(self.budget_encoder.parameters()) + list(self.budget_decoder.parameters()),
-            lr=config.lr,
+        rep_params = (
+            list(self.flow.parameters()) + [self.cpc_w] + list(self.budget_encoder.parameters()) + list(self.budget_decoder.parameters())
         )
+        if isinstance(self.posterior, nn.Module):  # context_mode="vae": the GRU posterior is learned
+            rep_params += list(self.posterior.parameters())
+        if self.context_decoder is not None:
+            rep_params += list(self.context_decoder.parameters())
+        self.rep_optimizer = torch.optim.Adam(rep_params, lr=config.lr)
         self.exp_policy_optimizer = torch.optim.Adam(self.exploration_policies.parameters(), lr=config.lr)
         self.exp_critic_optimizer = torch.optim.Adam(self.exploration_critics.parameters(), lr=config.lr)
         self.alpha_exp_optimizer = torch.optim.Adam([self.log_alpha_exp], lr=config.lr)
@@ -429,27 +456,58 @@ class Phase1Trainer:
             obs_i, action_i, next_obs_i, reward_i = batch["obs"][:, i], batch["action"][:, i], batch["next_obs"][:, i], batch["reward"][:, i]
             code, log_det = self._flow_code(self.flow, obs_i, action_i, next_obs_i, reward_i)
 
-            elbo = elbo_loss(
-                code=code,
-                log_det_jacobian=log_det,
-                predictive_mu=batch["mu_prev"][:, i],
-                predictive_sigma2=batch["sigma2_prev"][:, i],
-                posterior_mu=batch["mu_new"][:, i],
-                posterior_sigma2=batch["sigma2_new"][:, i],
-                prior_mu=torch.zeros_like(code),
-                prior_sigma2=torch.full_like(batch["sigma2_new"][:, i], cfg.nu),
-                kl_weight=cfg.kl_weight,
-            ).mean()
+            if cfg.context_mode == "bruno":
+                elbo = elbo_loss(
+                    code=code,
+                    log_det_jacobian=log_det,
+                    predictive_mu=batch["mu_prev"][:, i],
+                    predictive_sigma2=batch["sigma2_prev"][:, i],
+                    posterior_mu=batch["mu_new"][:, i],
+                    posterior_sigma2=batch["sigma2_new"][:, i],
+                    prior_mu=torch.zeros_like(code),
+                    prior_sigma2=torch.full_like(batch["sigma2_new"][:, i], cfg.nu),
+                    kl_weight=cfg.kl_weight,
+                ).mean()
+            else:  # "vae": decode y from a z sampled at the *predictive*
+                # (pre-update) posterior -- same anti-circularity reasoning
+                # as the bruno branch (encoder_losses.elbo_loss's docstring):
+                # the GRU's post-update hidden state already saw this exact
+                # transition, so decoding *that* back out would not test
+                # predictiveness, just autoencoding.
+                y_i = torch.cat([reward_i.unsqueeze(-1), next_obs_i], dim=-1)
+                condition_i = torch.cat([obs_i, action_i], dim=-1)
+                z_sample = batch["mu_prev"][:, i] + torch.sqrt(batch["sigma2_prev"][:, i]).unsqueeze(-1) * torch.randn_like(code)
+                decoder_mean, decoder_sigma2 = self.context_decoder(z_sample, condition_i)
+                elbo = vae_elbo_loss(
+                    y=y_i,
+                    decoder_mean=decoder_mean,
+                    decoder_sigma2=decoder_sigma2,
+                    posterior_mu=batch["mu_new"][:, i],
+                    posterior_sigma2=batch["sigma2_new"][:, i],
+                    prior_mu=torch.zeros_like(code),
+                    prior_sigma2=torch.full_like(batch["sigma2_new"][:, i], cfg.vae_prior_sigma2),
+                    kl_weight=cfg.kl_weight,
+                ).mean()
             elbo_total = elbo_total + elbo
 
             idx = self._sample_cpc_indices(batch["regime_mode"][:, i], batch["regime_vec"][:, i])
             if idx is not None:
                 anchor_idx, pos_idx, neg_idx = idx
-                with torch.no_grad():
-                    pool_code, _ = self._flow_code(self.flow_momentum, obs_i, action_i, next_obs_i, reward_i)
+                # Stop-gradient key branch (SimCLR-style), not a momentum
+                # copy: with negatives/positives resampled fresh from the
+                # SAME live minibatch every iteration (no external memory
+                # queue), a momentum-lagged encoder only adds a ~1/(1-tau_m)
+                # -iteration staleness between query and key embeddings for
+                # no compensating benefit -- MoCo's momentum target exists to
+                # keep a *queue* of past-batch keys consistent with a moving
+                # encoder, which doesn't apply here since every key is
+                # recomputed from current data every step. `code.detach()`
+                # keeps the collapse protection (no gradient through the key
+                # branch) without the lag.
+                pool_code = code.detach()
                 z_query = code[anchor_idx]        # (A, d)    online encoder, carries grad
-                z_positive = pool_code[pos_idx]   # (A, d)    momentum encoder
-                z_negatives = pool_code[neg_idx]  # (A, K, d) momentum encoder
+                z_positive = pool_code[pos_idx]   # (A, d)    stop-gradient
+                z_negatives = pool_code[neg_idx]  # (A, K, d) stop-gradient
                 cpc_total = cpc_total + infonce_cpc_loss(z_query, z_positive, z_negatives, self.cpc_w).mean()
                 n_cpc_terms += 1
 
@@ -479,10 +537,6 @@ class Phase1Trainer:
         loss.backward()
         self.rep_optimizer.step()
 
-        with torch.no_grad():
-            for p_bar, p in zip(self.flow_momentum.parameters(), self.flow.parameters()):
-                p_bar.mul_(cfg.tau_m).add_(p, alpha=1 - cfg.tau_m)
-
         return {"l_elbo": elbo_total.item(), "l_cpc": cpc_loss.item(), "l_rho": l_rho.item(), "l_cov": l_cov.item()}
 
     def _update_exploration(self) -> dict[str, float]:
@@ -497,6 +551,13 @@ class Phase1Trainer:
         total_critic_loss = torch.tensor(0.0, device=self.device)
         for i in range(self.n_agents):
             obs_i, action_i, next_obs_i = batch["obs"][:, i], batch["action"][:, i], batch["next_obs"][:, i]
+            # Eq.~pm-ig is the *exact* one-step information gain only under
+            # context_mode="bruno"'s closed-form Gaussian recursion. Under
+            # "vae" the same log-variance-ratio is still well-defined (the
+            # GRU posterior is Gaussian too) but is an uncalibrated
+            # heuristic proxy, not a derived information gain -- the
+            # "approximate entropy- or bound-difference estimate" fallback
+            # ch-proposed.tex allows for Option A.
             r_aux = information_gain_reward(batch["sigma2_prev"][:, i], batch["sigma2_new"][:, i])
             r_e = batch["reward"][:, i] + self.log_alpha_exp[i].exp().detach() * r_aux
 

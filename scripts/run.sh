@@ -6,6 +6,7 @@
 #   THREADS=4 bash scripts/run.sh                     # sweep 2/4/8 on CPU
 #   DEVICE=cuda N_ENVS=1024 RANDMAP=0 bash scripts/run.sh   # real GPU node
 #   CONFIG=world_config_random.yaml bash scripts/run.sh
+#   CONTEXT_MODE=vae bash scripts/run.sh              # learned GRU posterior instead of BRUNO
 #   RESUME=runs/uni_20260909_120000 bash scripts/run.sh
 #   sbatch scripts/run.sh                             # also a SLURM job
 #
@@ -33,6 +34,8 @@ P2_ITERS=${P2_ITERS:-1000}
 SHAPING=${SHAPING:-0.3}
 COLLISION=${COLLISION:-0.5}            # per-agent per-step overlap penalty (0 = off)
 DETECTOR_LOSS=${DETECTOR_LOSS:-paper}  # paper (arXiv:2510.24988v1) | indid
+CONTEXT_MODE=${CONTEXT_MODE:-vae}    # bruno (exact, fixed noise band) | vae (learned GRU posterior + decoder)
+CONTEXT_HIDDEN_DIM=${CONTEXT_HIDDEN_DIM:-64}  # CONTEXT_MODE=vae only: GRU hidden size / decoder width
 RANDMAP=${RANDMAP:-1}                  # 1 = --randomize-map; 0 = off
                                        # (the per-env reshuffle is O(N_ENVS)
                                        #  pure-Python -- set 0 at high N_ENVS)
@@ -82,6 +85,8 @@ ARGS=(
   --phase1-iters "$P1_ITERS"
   --phase2-iters "$P2_ITERS"
   --detector-loss "$DETECTOR_LOSS"
+  --context-mode "$CONTEXT_MODE"
+  --context-hidden-dim "$CONTEXT_HIDDEN_DIM"
   --checkpoint-every "$CKPT_EVERY"
   --log-every "$LOG_EVERY"
   --seed "$SEED"

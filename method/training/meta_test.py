@@ -105,6 +105,10 @@ class MetaTestRunner:
             *self.p1.execution_policies,
             *self.p1.execution_critics,
         ]
+        if isinstance(self.p1.posterior, torch.nn.Module):  # context_mode="vae"
+            modules.append(self.p1.posterior)
+        if self.p1.context_decoder is not None:
+            modules.append(self.p1.context_decoder)
         for m in modules:
             m.eval()
             for p in m.parameters():

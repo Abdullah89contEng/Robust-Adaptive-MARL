@@ -30,7 +30,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from utils.scenario import Scenario
 from method.training.phase1 import Phase1Trainer, Phase1Config
 from method.training.phase2 import Phase2Trainer, Phase2Config
-from method.io import resolve_device
+from method.io import phase1_module_keys, resolve_device
 
 
 def parse_args():
@@ -48,6 +48,11 @@ def parse_args():
                    help="per-agent per-step penalty for overlapping an obstacle or another agent (0 = off)")
     p.add_argument("--detector-loss", type=str, default="paper", choices=["paper", "indid"],
                    help="Phase-2 CPD objective: 'paper' (arXiv:2510.24988v1 BCE) or 'indid' (InDiD CPDLoss)")
+    p.add_argument("--context-mode", type=str, default="bruno", choices=["bruno", "vae"],
+                   help="context encoder: 'bruno' (exact exchangeable-process posterior, fixed noise band) "
+                        "or 'vae' (learned GRU posterior + decoder, ch-proposed.tex Option A)")
+    p.add_argument("--context-hidden-dim", type=int, default=64,
+                   help="context_mode=vae only: GRU hidden size / decoder width")
     p.add_argument("--randomize-map", action="store_true",
                    help="re-randomize obstacle/victim/agent positions each iteration (boundary fixed)")
     p.add_argument("--device", type=str, default="auto",
@@ -58,24 +63,8 @@ def parse_args():
     return p.parse_args()
 
 
-CHECKPOINT_KEYS = [
-    "flow",
-    "flow_momentum",
-    "budget_encoder",
-    "budget_decoder",
-    "exploration_policies",
-    "exploration_critics",
-    "exploration_critics_target",
-    "execution_policies",
-    "execution_critics",
-    "execution_critics_target",
-    "mixer",
-    "mixer_target",
-]
-
-
 def save_checkpoint(trainer: Phase1Trainer, path: Path) -> None:
-    state = {key: getattr(trainer, key).state_dict() for key in CHECKPOINT_KEYS}
+    state = {key: getattr(trainer, key).state_dict() for key in phase1_module_keys(trainer)}
     state["log_alpha_exp"] = trainer.log_alpha_exp.detach().clone()
     state["log_alpha_exe"] = trainer.log_alpha_exe.detach().clone()
     torch.save(state, path)
@@ -83,8 +72,9 @@ def save_checkpoint(trainer: Phase1Trainer, path: Path) -> None:
 
 def load_checkpoint(trainer: Phase1Trainer, path: Path) -> None:
     state = torch.load(path, map_location=trainer.device)
-    missing = [key for key in CHECKPOINT_KEYS if key not in state]
-    for key in CHECKPOINT_KEYS:
+    checkpoint_keys = phase1_module_keys(trainer)
+    missing = [key for key in checkpoint_keys if key not in state]
+    for key in checkpoint_keys:
         if key in state:
             getattr(trainer, key).load_state_dict(state[key])
     if missing:
@@ -135,6 +125,11 @@ def main():
         args.detector_loss = prev_args.get("detector_loss", "paper")
         args.randomize_map = prev_args.get("randomize_map", False)
         args.collision_penalty = prev_args.get("collision_penalty", 0.0)
+        # A resumed run's architecture must match its checkpoint exactly --
+        # context_mode picks which modules exist at all (posterior type,
+        # presence of context_decoder), unlike a pure loss-weight knob.
+        args.context_mode = prev_args.get("context_mode", "bruno")
+        args.context_hidden_dim = prev_args.get("context_hidden_dim", 64)
         latest_ckpt, last_done_iter = find_latest_checkpoint(out_dir)
         start_iter = last_done_iter + 1
         print(f"Resuming from {latest_ckpt} (continuing at iteration {start_iter})")
@@ -145,7 +140,10 @@ def main():
     (out_dir / "args.json").write_text(json.dumps(vars(args), indent=2))
     print(f"Writing outputs to {out_dir}")
 
-    p1_config = Phase1Config(n_envs=args.n_envs, horizon=args.horizon)
+    p1_config = Phase1Config(
+        n_envs=args.n_envs, horizon=args.horizon,
+        context_mode=args.context_mode, context_hidden_dim=args.context_hidden_dim,
+    )
     trainer1 = Phase1Trainer(
         scenario_factory=lambda: Scenario(config_file=args.config_file, shaping_weight=args.shaping_weight,
                                           randomize_map=args.randomize_map,

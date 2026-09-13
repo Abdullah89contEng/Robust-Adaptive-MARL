@@ -1,12 +1,22 @@
 """Encoder training losses (method-spec.md §3): L_enc = L_ELBO + lambda_CPC * L_CPC.
 
-L_ELBO's reconstruction term uses the flow's own change-of-variables
-density rather than a separate decoder network: since f_phi is invertible,
+Two ELBO variants live here, one per `context_mode` (`phase1.py`).
+
+`elbo_loss` (Option B / "bruno", the default) scores the reconstruction
+term under the flow's own change-of-variables density rather than a
+separate decoder network: since f_phi is invertible,
 `log p_psi(y | z, x) = log N(f_phi(y|x); mu_z, sigma2_z) + log|det df_phi/dy|`
 is an exact likelihood, not an approximation — this is exactly how
 bruno-sac's `get_sequence_model_likelihoods` computes its reconstruction
 term (`llp_model + jacob`), and it avoids training a second, redundant
-network to invert what the flow already inverts.
+network to invert what the flow already inverts. It requires the assumed
+per-code noise band (nu, kappa) to actually match how much a transition
+varies within one regime — see `vae_elbo_loss` below for the alternative
+that does not.
+
+`vae_elbo_loss` (Option A / "vae") scores reconstruction under a learned
+decoder (`method/encoders/vae_context.ContextDecoder`) instead, so the
+noise band is learned rather than fixed by (nu, kappa).
 """
 
 from __future__ import annotations
@@ -22,6 +32,41 @@ def gaussian_log_prob(code: torch.Tensor, mu: torch.Tensor, sigma2: torch.Tensor
     sigma2 = sigma2.unsqueeze(-1)
     log_pdf = -0.5 * torch.log(2 * torch.pi * sigma2) - (code - mu) ** 2 / (2 * sigma2)
     return log_pdf.sum(dim=-1)
+
+
+def gaussian_log_prob_diag(x: torch.Tensor, mu: torch.Tensor, sigma2: torch.Tensor) -> torch.Tensor:
+    """log N(x; mu, diag(sigma2)), summed over the last dimension.
+
+    x, mu, sigma2: all (..., dim) -- a per-dimension (not isotropic)
+    diagonal covariance, unlike `gaussian_log_prob`'s single isotropic
+    sigma2. Used by `vae_elbo_loss`'s decoder likelihood: a learned
+    decoder should be free to give each observation channel (lidar, ears,
+    position, ...) its own noise scale, since those channels have very
+    different natural scales. Forcing one shared scalar here would just
+    move the fixed-noise-band mismatch `vae_elbo_loss` exists to avoid
+    from (nu, kappa) to a single learned number instead of removing it.
+    """
+    log_pdf = -0.5 * torch.log(2 * torch.pi * sigma2) - (x - mu) ** 2 / (2 * sigma2)
+    return log_pdf.sum(dim=-1)
+
+
+def diag_gaussian_kl(
+    posterior_mu: torch.Tensor,
+    posterior_sigma2: torch.Tensor,
+    prior_mu: torch.Tensor,
+    prior_sigma2: torch.Tensor,
+) -> torch.Tensor:
+    """KL(N(posterior_mu, posterior_sigma2*I) || N(prior_mu, prior_sigma2*I)),
+    both isotropic diagonal Gaussians over the last (code) dimension.
+    Shared by `elbo_loss` (Option B) and `vae_elbo_loss` (Option A) —
+    the two modes differ in how the reconstruction term is scored, not
+    in how the posterior is regularized toward the prior.
+    """
+    code_dim = posterior_mu.shape[-1]
+    return 0.5 * (
+        code_dim * (posterior_sigma2 / prior_sigma2 - 1 - torch.log(posterior_sigma2 / prior_sigma2))
+        + ((posterior_mu - prior_mu) ** 2).sum(dim=-1) / prior_sigma2
+    )
 
 
 def elbo_loss(
@@ -74,12 +119,36 @@ def elbo_loss(
     """
     log_p_y_given_z = gaussian_log_prob(code, predictive_mu, predictive_sigma2) + log_det_jacobian
     reconstruction = -log_p_y_given_z
+    kl = diag_gaussian_kl(posterior_mu, posterior_sigma2, prior_mu, prior_sigma2)
+    return reconstruction + kl_weight * kl
 
-    code_dim = code.shape[-1]
-    kl = 0.5 * (
-        code_dim * (posterior_sigma2 / prior_sigma2 - 1 - torch.log(posterior_sigma2 / prior_sigma2))
-        + ((posterior_mu - prior_mu) ** 2).sum(dim=-1) / prior_sigma2
-    )
+
+def vae_elbo_loss(
+    y: torch.Tensor,
+    decoder_mean: torch.Tensor,
+    decoder_sigma2: torch.Tensor,
+    posterior_mu: torch.Tensor,
+    posterior_sigma2: torch.Tensor,
+    prior_mu: torch.Tensor,
+    prior_sigma2: torch.Tensor,
+    kl_weight: float = 1.0,
+) -> torch.Tensor:
+    """L_ELBO for `context_mode="vae"` (Option A):
+    -log p_psi(y|z,x) + kl_weight * KL(q(z|tau) || p(z)).
+
+    Unlike `elbo_loss` (Option B), reconstruction is scored under a
+    *learned* decoder density (`decoder_mean`, `decoder_sigma2`, from
+    `vae_context.ContextDecoder`, evaluated at a `z` sampled from the
+    *predictive*, pre-update posterior — same anti-circularity reasoning
+    as `elbo_loss`'s docstring) rather than the flow's own change-of-
+    variables density under a fixed (nu, kappa) band, so the reconstruction
+    noise is whatever the decoder learns rather than a hand-set constant.
+    The KL term is identical in form to `elbo_loss`'s and, likewise,
+    regularizes the fully-updated (post-update) posterior against the
+    prior.
+    """
+    reconstruction = -gaussian_log_prob_diag(y, decoder_mean, decoder_sigma2)
+    kl = diag_gaussian_kl(posterior_mu, posterior_sigma2, prior_mu, prior_sigma2)
     return reconstruction + kl_weight * kl
 
 
@@ -90,8 +159,8 @@ def infonce_cpc_loss(
     """L_CPC (InfoNCE), spec eq:pm-enc: f(z, z') = z^T W z', W learnable.
 
     z_query:     (B, d)      online embedding of a same-regime segment
-    z_positive:  (B, d)      momentum embedding of a *different* same-regime segment
-    z_negatives: (B, K, d)   momentum embeddings of other-regime segments
+    z_positive:  (B, d)      stop-gradient embedding of a *different* same-regime segment
+    z_negatives: (B, K, d)   stop-gradient embeddings of other-regime segments
     w:           (d, d)      learnable bilinear form
 
     The embeddings are L2-normalized before the bilinear score (standard

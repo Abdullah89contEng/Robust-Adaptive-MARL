@@ -15,7 +15,7 @@ import matplotlib; matplotlib.use("Agg"); import matplotlib.pyplot as plt
 _E = lambda k, d: type(d)(os.environ.get(k, d))
 
 from utils.scenario import Scenario
-from method.io import load_phase1, resolve_device
+from method.io import load_phase1, phase1_module_keys, resolve_device
 from method.training.phase1 import Phase1Trainer, Phase1Config
 from method.training.phase2 import Phase2Trainer, Phase2Config
 from method.detector.indid import (detection_loss, labels_from_switch_time,
@@ -44,11 +44,8 @@ CHANGE_STEP  = 40
 NORMAL, HEAVY = Regime(1.10, 0.16), Regime(1.52, 0.36)
 DEVICE       = os.environ.get("DEVICE", "auto")  # auto | cpu | cuda | cuda:N
 _dev = resolve_device(DEVICE)
-
-CKPT_KEYS = ["flow", "flow_momentum", "budget_encoder", "budget_decoder",
-             "exploration_policies", "exploration_critics", "exploration_critics_target",
-             "execution_policies", "execution_critics", "execution_critics_target",
-             "mixer", "mixer_target"]
+CONTEXT_MODE = os.environ.get("CONTEXT_MODE", "bruno")   # "bruno" | "vae"
+CONTEXT_HIDDEN = _E("CONTEXT_HIDDEN", 64)                # context_mode=vae only
 
 out = Path(__file__).resolve().parents[1] / "runs" / ("fast_" + time.strftime("%Y%m%d_%H%M%S"))
 out.mkdir(parents=True, exist_ok=True)
@@ -60,18 +57,27 @@ t0 = time.time()
 # =====================================================================
 if P1_CKPT:
     print(f"phase1: SKIPPED, loading {P1_CKPT}")
+    # This script never writes an args.json (unlike scripts/train.py), so
+    # `load_phase1` has nothing to auto-detect the checkpoint's config
+    # from -- an explicit override is required, same as it always was for
+    # n_envs/horizon. CONTEXT_MODE/CONTEXT_HIDDEN must be set to match
+    # whatever the checkpoint was actually trained with (bruno checkpoints
+    # need nothing; a "vae" checkpoint needs CONTEXT_MODE=vae here too, or
+    # the reconstructed trainer's posterior/decoder won't match the file).
     t1 = load_phase1(P1_CKPT, scenario_factory=lambda: Scenario(config_file=CFG, shaping_weight=SHAPING,
                      randomize_map=bool(RANDMAP), collision_penalty=COLLISION),
-                     config=Phase1Config(n_envs=8, horizon=HORIZON), device=_dev)
+                     config=Phase1Config(n_envs=8, horizon=HORIZON, context_mode=CONTEXT_MODE,
+                                         context_hidden_dim=CONTEXT_HIDDEN),
+                     device=_dev)
     log = []
 else:
-  p1cfg = Phase1Config(n_envs=8, horizon=HORIZON)
+  p1cfg = Phase1Config(n_envs=8, horizon=HORIZON, context_mode=CONTEXT_MODE, context_hidden_dim=CONTEXT_HIDDEN)
   t1 = Phase1Trainer(lambda: Scenario(config_file=CFG, shaping_weight=SHAPING,
                                       randomize_map=bool(RANDMAP), collision_penalty=COLLISION),
                      p1cfg, device=_dev)
   print(f"phase1: n_agents={t1.n_agents} obs_dim={t1.obs_dim}  {P1_ITERS} iters, horizon {HORIZON}")
   def _save_p1(path):
-      st = {k: getattr(t1, k).state_dict() for k in CKPT_KEYS}
+      st = {k: getattr(t1, k).state_dict() for k in phase1_module_keys(t1)}
       st["log_alpha_exp"] = t1.log_alpha_exp.detach().clone()
       st["log_alpha_exe"] = t1.log_alpha_exe.detach().clone()
       torch.save(st, path)

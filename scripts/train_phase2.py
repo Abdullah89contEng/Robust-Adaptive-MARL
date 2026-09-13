@@ -35,23 +35,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from utils.scenario import Scenario
 from method.training.phase1 import Phase1Trainer, Phase1Config
 from method.training.phase2 import Phase2Trainer, Phase2Config
-from method.io import resolve_device
-
-# Same set train.py uses, minus the log_alpha tensors (handled separately).
-CHECKPOINT_KEYS = [
-    "flow",
-    "flow_momentum",
-    "budget_encoder",
-    "budget_decoder",
-    "exploration_policies",
-    "exploration_critics",
-    "exploration_critics_target",
-    "execution_policies",
-    "execution_critics",
-    "execution_critics_target",
-    "mixer",
-    "mixer_target",
-]
+from method.io import phase1_module_keys, resolve_device
 
 
 def parse_args():
@@ -61,6 +45,9 @@ def parse_args():
                    help="override the map yaml recorded in the Phase-1 run's args.json "
                         "(default: reuse it, so the detector sees the same episode distribution)")
     p.add_argument("--phase2-iters", type=int, default=300)
+    p.add_argument("--checkpoint-every", type=int, default=0,
+                   help="save phase2_detector.pt every N iterations, in addition to the final "
+                        "save (0 = only save once, at the end, the old behavior)")
     p.add_argument("--log-every", type=int, default=20)
     p.add_argument("--detector-loss", type=str, default="paper", choices=["paper", "indid"],
                    help="Phase-2 CPD objective: 'paper' (arXiv:2510.24988v1 BCE) or 'indid' (InDiD CPDLoss)")
@@ -75,7 +62,7 @@ def parse_args():
 
 def load_phase1(trainer: Phase1Trainer, ckpt_path: Path) -> None:
     state = torch.load(ckpt_path, map_location=trainer.device)
-    for key in CHECKPOINT_KEYS:
+    for key in phase1_module_keys(trainer):
         if key in state:
             getattr(trainer, key).load_state_dict(state[key])
         elif key.endswith("_target"):
@@ -117,7 +104,11 @@ def main():
     trainer1 = Phase1Trainer(
         scenario_factory=lambda: Scenario(config_file=config_file, randomize_map=args.randomize_map,
                                           collision_penalty=prev_args.get("collision_penalty", 0.0)),
-        config=Phase1Config(n_envs=n_envs, horizon=horizon),
+        config=Phase1Config(
+            n_envs=n_envs, horizon=horizon,
+            context_mode=prev_args.get("context_mode", "bruno"),
+            context_hidden_dim=prev_args.get("context_hidden_dim", 64),
+        ),
         device=dev,
     )
     load_phase1(trainer1, ckpt_path)
@@ -145,6 +136,9 @@ def main():
         if it % args.log_every == 0 or it == args.phase2_iters - 1:
             print(f"[phase2] iter {it:>5}/{args.phase2_iters} | l_cpd={stats['l_cpd']:.4f} "
                   f"grad_norm={stats['grad_norm']:.3f} | nan_so_far={n_nan}")
+        if args.checkpoint_every > 0 and (it + 1) % args.checkpoint_every == 0:
+            torch.save(trainer2.detector.state_dict(), out_dir / "phase2_detector.pt")
+            print(f"[phase2] checkpoint saved at iter {it} -> {out_dir / 'phase2_detector.pt'}")
 
     torch.save(trainer2.detector.state_dict(), out_dir / "phase2_detector.pt")
     print(f"Phase 2 done in {time.time() - start:.1f}s | total NaN iters: {n_nan}/{args.phase2_iters}")
