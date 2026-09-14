@@ -1,0 +1,12 @@
+{
+  "phase1_ckpt": "/home/Robust-Adaptive-MARL/runs/uni_20260911_012419/phase1_checkpoint_19500.pt",
+  "config_file": null,
+  "phase2_iters": 100,
+  "checkpoint_every": 10,
+  "log_every": 20,
+  "detector_loss": "paper",
+  "randomize_map": true,
+  "device": "auto",
+  "seed": 0,
+  "out_dir": null
+}

@@ -1,0 +1,19 @@
+{
+  "phase1_iters": 20000,
+  "phase2_iters": 1000,
+  "n_envs": 10,
+  "horizon": 350,
+  "checkpoint_every": 500,
+  "log_every": 20,
+  "config_file": "map.yaml",
+  "shaping_weight": 0.3,
+  "collision_penalty": 0.5,
+  "detector_loss": "paper",
+  "context_mode": "vae",
+  "context_hidden_dim": 64,
+  "randomize_map": true,
+  "device": "auto",
+  "seed": 0,
+  "out_dir": "runs/uni_20260912_170324",
+  "resume": null
+}
